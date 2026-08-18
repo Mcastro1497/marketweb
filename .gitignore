@@ -1,0 +1,23 @@
+# ── Secretos ────────────────────────────────────────────────────────────────
+# .env tiene SERVICE_KEY de Supabase y las credenciales de ECO y BYMA.
+# Nunca debe entrar al repo.
+.env
+.env.*
+!.env.example
+
+# ── Entorno ─────────────────────────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ── Datos ───────────────────────────────────────────────────────────────────
+# Los xlsx son binarios grandes y regenerables desde BYMA (excel.xlsx son 5 MB).
+# Los CSV sí se versionan: son texto, diffean bien y sirven de referencia.
+*.xlsx
+*.xls
+logs/
+
+# ── Sistema ─────────────────────────────────────────────────────────────────
+.DS_Store
