@@ -7,7 +7,7 @@ Calcula TIR (XIRR) y Duration de Macaulay para ONs y Soberanos HD.
 - Upsert en prices: ytm, duration_y.
 """
 
-import os, time
+import os, sys, time
 from math import isfinite
 from datetime import datetime, timezone, time as dtime, date as dtdate
 from typing import Dict, List, Optional, Set, Tuple
@@ -218,6 +218,15 @@ def once() -> int:
     return updated
 
 def main():
+    # --once: una sola pasada y sale. Es como lo invoca run.py, y es lo que
+    # permite correr todo desde un scheduler en vez de dejar daemons vivos.
+    if "--once" in sys.argv:
+        try:
+            once()
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            raise SystemExit(1)
+        raise SystemExit(0)
     while True:
         try:
             n = once()

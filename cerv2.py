@@ -310,25 +310,19 @@ def build(apply=False):
 def project_once(apply=True):
     """Recalcula las columnas proyectadas de instrument_flows: base × ratio CER.
 
-    Se escribe con upsert en lotes y no con un update por fila. Antes eran ~1.800
-    llamadas HTTP por ciclo, una por flujo; ahora son unas pocas. El id va en el
-    payload, así que el upsert resuelve por clave primaria y actualiza sólo las
-    columnas proyectadas."""
+    Una sola llamada a la RPC proyectar_flujos (sql/014), que hace todo en un
+    UPDATE. Antes era un UPDATE por fila: ~1.800 requests HTTP por ciclo. El
+    intento de batchearlo con upsert no sirve — el upsert de PostgREST es
+    INSERT ... ON CONFLICT y, sin conflicto, inserta una fila con symbol NULL.
+    La operación es una multiplicación de columnas: le corresponde a SQL.
+    """
     ctx = ctx_actual()
     if not ctx["cer_t10"]: print("[X] Sin CER(t-10)."); return 0
-    bonos = all_bonds(); n = 0; lote = []
-    for b in bonos:
-        s_ = b["symbol"]; k = ratio_de(b, ctx)
-        rows = (sb.table(FLOWS).select("id, interes, amortizacion, total")
-                  .eq("symbol", s_).execute().data or [])
-        for r in rows:
-            fila = {"id": r["id"]}
-            fila.update({proy: (None if r.get(base) is None else float(r[base]) * k)
-                         for base, proy in zip(BASE, PROY)})
-            lote.append(fila); n += 1
-    if apply and lote:
-        for i in range(0, len(lote), 500):
-            sb.table(FLOWS).upsert(lote[i:i+500]).execute()
+    bonos = all_bonds()
+    ratios = {b["symbol"]: ratio_de(b, ctx) for b in bonos}
+    n = 0
+    if apply and ratios:
+        n = sb.rpc("proyectar_flujos", {"ratios": ratios}).execute().data or 0
     print(f"[{datetime.now(timezone.utc):%H:%M:%S}] CER(t-10)={ctx['cer_t10']} proyectados: {n} flujos de {len(bonos)} bonos")
     return n
 

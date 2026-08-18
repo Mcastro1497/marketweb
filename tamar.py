@@ -27,6 +27,7 @@ script sigue siendo el dueño de las columnas TAMAR de `prices`; patas.py sólo
 escribe el headline de bonos multi-pata salvo que se lo corra con --headline-all.
 """
 import os
+import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from dotenv import load_dotenv
@@ -282,6 +283,15 @@ def once():
             print(f"[ERROR] {inst.get('symbol','?')}: {e}")
 
 def main():
+    # --once: una sola pasada y sale. Es como lo invoca run.py, y es lo que
+    # permite correr todo desde un scheduler en vez de dejar daemons vivos.
+    if "--once" in sys.argv:
+        try:
+            once()
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            raise SystemExit(1)
+        raise SystemExit(0)
     print(f"[TAMAR] Valuación cada {INTERVAL_SEC/60:.0f} min")
     while True:
         try:

@@ -18,8 +18,14 @@ Cambios respecto de precios.py:
 OJO: no correr junto con precios.py (ambos escriben en `prices`).
 """
 
+import argparse
 import os, time, signal, threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as dtime
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -204,12 +210,48 @@ def pusher_loop():
         _stop.wait(1.0)
 
 # ── Main ──────────────────────────────────────────────────
+def _tz():
+    """Zona horaria local, de LOCAL_TZ en el .env. Misma convención que dlk.py."""
+    nombre = os.getenv("LOCAL_TZ", "America/Argentina/Cordoba")
+    if ZoneInfo:
+        try:
+            return ZoneInfo(nombre)
+        except Exception:
+            pass
+    return timezone.utc
+
+
+def _tz_name():
+    return os.getenv("LOCAL_TZ", "UTC")
+
+
+def _now_local():
+    return datetime.now(_tz())
+
+
+def _parse_hora(txt):
+    """'17:15' -> time(17, 15). La hora es LOCAL (LOCAL_TZ del .env)."""
+    h, m = txt.split(":")
+    return dtime(int(h), int(m))
+
+
 if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="Precios en tiempo real desde ECO")
+    ap.add_argument("--hasta", metavar="HH:MM",
+                    help="apagarse solo a esta hora local. Convierte el proceso en un "
+                         "job programable: arranca a la apertura, vive la rueda y "
+                         "termina al cierre, sin quedar como daemon permanente.")
+    _args = ap.parse_args()
+    _limite = _parse_hora(_args.hasta) if _args.hasta else None
+
     running = True
     def stop_handler(sig, frame):
         global running
         print("\nDeteniendo..."); running = False; _stop.set()
     signal.signal(signal.SIGINT, stop_handler)
+    # SIGTERM además de SIGINT: es la señal que manda un scheduler o un
+    # contenedor al parar, y sin esto el websocket quedaría sin cerrar.
+    signal.signal(signal.SIGTERM, stop_handler)
 
     init_eco()
     instruments = load_instruments()
@@ -245,8 +287,14 @@ if __name__ == "__main__":
     pyRofex.market_data_subscription(tickers=symbols_ws, entries=entries)
 
     t = threading.Thread(target=pusher_loop, daemon=True); t.start()
+    if _limite:
+        print(f"[WS] Se apaga solo a las {_limite.strftime('%H:%M')} ({_tz_name()})")
     try:
-        while running: time.sleep(0.5)
+        while running:
+            if _limite and _now_local().time() >= _limite:
+                print(f"\n[WS] Hora de cierre ({_limite.strftime('%H:%M')}), terminando.")
+                break
+            time.sleep(0.5)
     finally:
         _stop.set(); t.join(timeout=2.0)
         pyRofex.close_websocket_connection()
