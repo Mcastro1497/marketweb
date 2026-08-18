@@ -9,6 +9,7 @@ acá debe correrse: varios apuntan a tablas viejas y sobrescribirían datos buen
 | `cer.py` | Su propio reemplazo lo declara desestimado: ver el docstring de `cerv2.py`. |
 | `cer_test.py` | Script de prueba de un solo bono. |
 | `explora2.py`, `explora_acciones.py` | Exploración del universo de ECO, de una sola vez. |
+| `updatetamar.py` | Reemplazado por `series_sync.py`, que recorre el catálogo `series_defs` y sincroniza todas las series con el mismo código. Además escribía en `tamar_historico`, que desde sql/012 es una vista de sólo lectura. |
 | `cleanflows.py` | Utilitario de limpieza puntual. Borra filas de `instrument_flows_v2`, `instruments_v2` y `prices`: NO correr sin leerlo antes. |
 
 `tamar.py` NO está acá. La pata TAMAR de `patas.py` lo reproduce y está verificado

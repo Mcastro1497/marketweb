@@ -3,7 +3,7 @@ valuar_tamar_supabase.py
 Valuación de BONOS TAMAR del Tesoro (floater capitalizable, bullet) — TMF27 y similares.
 
 Lee:
-  - tamar_historico (fecha, valor_tna en %)   -> serie diaria sincronizada por sync_tamar.py
+  - series (serie=tamar_tna, valor en %)      -> sincronizada por series_sync.py
   - instruments (tipo='TAMAR', is_active)      -> fechas, margen (cupon)
   - prices                                     -> precio de mercado (de Precios_v5)
   - holidays                                   -> feriados para los "10 días hábiles"
@@ -131,12 +131,20 @@ def rango_habiles(ini: date, fin: date, feriados: set):
 
 # ============================ carga de datos ============================
 def cargar_tamar() -> dict:
-    """{date: TNA_decimal}. valor_tna en tamar_historico está en %, se divide por 100."""
-    res = sb.table("tamar_historico").select("fecha, valor_tna").order("fecha").execute()
+    """{date: TNA_decimal}. En `series` la TAMAR va cruda en %, se divide por 100."""
+    # Paginado: PostgREST corta en 1.000 filas por defecto, sin avisar.
+    filas, desde = [], 0
+    while True:
+        d = (sb.table("series").select("fecha, valor").eq("serie", "tamar_tna")
+               .order("fecha").range(desde, desde + 999).execute().data or [])
+        filas += d
+        if len(d) < 1000:
+            break
+        desde += 1000
     serie = {}
-    for r in (res.data or []):
+    for r in filas:
         try:
-            serie[date.fromisoformat(str(r["fecha"])[:10])] = float(r["valor_tna"]) / 100
+            serie[date.fromisoformat(str(r["fecha"])[:10])] = float(r["valor"]) / 100
         except Exception:
             pass
     return serie

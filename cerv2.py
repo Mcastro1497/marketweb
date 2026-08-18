@@ -4,7 +4,7 @@
 Engine de soberanos ARS (CER / FIJA). Reemplaza a cer.py (desestimado).
 
 Hace TODO:
-  - Sincroniza CER del BCRA (cer_historico).
+  - Lee el CER de `series` (lo sincroniza series_sync.py).
   - Valúa cada bono (XIRR/duration/TNA) y escribe prices (ytm, duration_y, tna,
     cer_fixed).  Para CER ajusta el precio por el coeficiente CER/cer_emision.
   - Lógica de "bono fijo": si hoy ya pasó el t-10 del vencimiento, el CER del
@@ -62,27 +62,18 @@ APPLY   = "--apply" in sys.argv
 SYM_ARG = next((a for a in sys.argv[1:] if not a.startswith("-")), None)
 
 
-# ── Sync CER desde BCRA ───────────────────────────────────
+# ── Sync CER ──────────────────────────────────────────────
 def sync_cer_from_bcra() -> int:
-    try:
-        resp = requests.get(BCRA_URL, params={"Limit": CER_LIMIT}, timeout=10,
-                            headers={"Accept": "application/json"})
-        resp.raise_for_status()
-        detalle = resp.json().get("results", [{}])[0].get("detalle", [])
-    except Exception as e:
-        print(f"[WARN] BCRA error: {e}"); return 0
-    rows = []
-    for item in detalle:
-        f, v = item.get("fecha"), item.get("valor")
-        if f and v is not None:
-            try: rows.append({"fecha": str(f)[:10], "valor_cer": float(v)})
-            except: pass
-    if not rows: print("[WARN] BCRA: sin filas válidas"); return 0
-    rows.sort(key=lambda x: x["fecha"], reverse=True)
-    sb.table("cer_historico").delete().neq("fecha", "1900-01-01").execute()
-    sb.table("cer_historico").insert(rows).execute()
-    print(f"[CER] Sync OK: {len(rows)} valores — último {rows[0]['fecha']} = {rows[0]['valor_cer']:.6f}")
-    return len(rows)
+    """El sync de CER se mudó a series_sync.py, que recorre el catálogo
+    series_defs y trae todas las series con el mismo código.
+
+    El de acá además era frágil: hacía delete() de TODA cer_historico y después
+    insert(). Si el insert fallaba después del delete, la serie quedaba vacía. Es
+    la razón de que sólo hubiera 60 días de historia y de que el CER base de los
+    duales haya tenido que buscarse a mano en la API. series_sync.py usa upsert
+    incremental con solape, así que no puede perder datos."""
+    print("[CER] El sync se hace con series_sync.py (serie 'cer'). Nada que hacer acá.")
+    return 0
 
 
 # ── Calendario ────────────────────────────────────────────
@@ -162,10 +153,10 @@ def macaulay(cfs_pos, r):
 
 # ── Datos ─────────────────────────────────────────────────
 def load_cer_value(d: pd.Timestamp) -> Optional[float]:
-    rows = (sb.table("cer_historico").select("fecha, valor_cer")
+    rows = (sb.table("series").select("fecha, valor").eq("serie", "cer")
               .lte("fecha", d.strftime("%Y-%m-%d")).order("fecha", desc=True)
               .limit(1).execute().data or [])
-    return float(rows[0]["valor_cer"]) if rows and rows[0].get("valor_cer") else None
+    return float(rows[0]["valor"]) if rows and rows[0].get("valor") is not None else None
 
 def all_bonds():
     """Todos los instrumentos activos (para poblar/proyectar v3 completo)."""

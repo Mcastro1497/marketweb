@@ -7,7 +7,7 @@ un dual es un bono de DOS. Al vencimiento paga el máximo entre ellas.
 Lee:
   - instrument_legs  (symbol, leg, params)   -> qué patas tiene cada bono
   - scenarios        (id, supuestos)         -> supuestos de proyección
-  - instruments_v2, prices, holidays, tamar_historico
+  - instruments, prices, holidays, series (cer / tamar_tna / a3500)
 Escribe:
   - valuations       (symbol, leg, scenario) -> una fila por pata
   - prices           (headline de la pata ganadora: ytm/duration_y/vpv/paridad)
@@ -122,6 +122,31 @@ def _pick(row: dict, candidatos):
     return None
 
 
+def cargar_serie(nombre: str) -> dict:
+    """{date: valor} de `series`, paginando.
+
+    PostgREST corta en 1.000 filas por defecto y no avisa: devuelve las primeras
+    1.000 del orden pedido y listo. Con la serie de CER en 1.100+ datos eso hacía
+    que el último dato "observado" fuera de mayo, y la TIR real salía ~275 bps
+    abajo sin ningún error a la vista. Cualquier lectura de una tabla que pueda
+    crecer tiene que paginar."""
+    out, desde = {}, 0
+    while True:
+        d = (sb.table("series").select("fecha, valor").eq("serie", nombre)
+               .order("fecha").range(desde, desde + 999).execute().data or [])
+        for r in d:
+            v = _f(r.get("valor"))
+            if v is None:
+                continue
+            try:
+                out[date.fromisoformat(str(r["fecha"])[:10])] = v
+            except ValueError:
+                pass
+        if len(d) < 1000:
+            return out
+        desde += 1000
+
+
 def _f(x, default=None):
     try:
         return float(x)
@@ -132,7 +157,7 @@ def _f(x, default=None):
 # ════════════════════════════ contexto ════════════════════════════
 class Ctx:
     """Datos compartidos por los motores. Carga perezosa: si no hay ninguna pata
-    TAMAR que valuar, no se pega el viaje a tamar_historico."""
+    TAMAR que valuar, no se pega el viaje a la tabla de series."""
 
     def __init__(self, hoy: date):
         self.hoy = hoy
@@ -157,34 +182,16 @@ class Ctx:
 
     @property
     def tamar(self) -> dict:
-        """{date: TNA decimal}. valor_tna viene en % en la tabla."""
+        """{date: TNA decimal}. En `series` la TAMAR va cruda en % (23.25)."""
         if self._tamar is None:
-            res = sb.table("tamar_historico").select("fecha, valor_tna").order("fecha").execute()
-            self._tamar = {}
-            for r in (res.data or []):
-                v = _f(r.get("valor_tna"))
-                if v is None:
-                    continue
-                try:
-                    self._tamar[date.fromisoformat(str(r["fecha"])[:10])] = v / 100
-                except ValueError:
-                    pass
+            self._tamar = {f: v / 100 for f, v in cargar_serie("tamar_tna").items()}
         return self._tamar
 
     @property
     def cer(self) -> dict:
-        """{date: coeficiente CER}. Serie que sincroniza cerv2.py desde el BCRA."""
+        """{date: coeficiente CER}. La sincroniza series_sync.py desde el BCRA."""
         if self._cer is None:
-            res = sb.table("cer_historico").select("fecha, valor_cer").order("fecha").execute()
-            self._cer = {}
-            for r in (res.data or []):
-                v = _f(r.get("valor_cer"))
-                if v is None:
-                    continue
-                try:
-                    self._cer[date.fromisoformat(str(r["fecha"])[:10])] = v
-                except ValueError:
-                    pass
+            self._cer = cargar_serie("cer")
         return self._cer
 
     @property
