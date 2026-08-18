@@ -52,7 +52,7 @@ PAGE_SIZE    = int(os.getenv("PAGE_SIZE", "1000"))
 CER_LIMIT    = int(os.getenv("CER_SYNC_LIMIT", "60"))
 BCRA_URL     = "https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias/30"  # idVariable 30 = CER
 
-V3   = "instrument_flows_proyectados"
+FLOWS = "instrument_flows"   # base + columnas proyectadas, fusionadas por sql/011
 PROY = ("interes_proyectado", "amortizacion_proyectado", "total_proyectado")
 BASE = ("interes", "amortizacion", "total")
 
@@ -308,37 +308,36 @@ def valuar_prices() -> int:
 
 # ── instrument_flows_v3 (base + proyectados) ──────────────
 def build(apply=False):
-    ctx = ctx_actual()
-    if not ctx["cer_t10"]: print("[X] Sin CER(t-10)."); return
-    print(f"CER(t-10)={ctx['cer_t10']}  ({'APLICA' if apply else 'DRY-RUN'})\n")
-    DROP = {"id", "created_at"}; tot = 0
-    for b in all_bonds():
-        s = b["symbol"]; k = ratio_de(b, ctx); fx = " [FIJO]" if es_fijo(b, ctx) else ""
-        base_rows = sb.table("instrument_flows").select("*").eq("symbol", s).execute().data or []
-        rows = []
-        for r in base_rows:
-            row = {kk: vv for kk, vv in r.items() if kk not in DROP}
-            for base, proy in zip(BASE, PROY):
-                v = row.get(base); row[proy] = None if v is None else float(v) * k
-            rows.append(row)
-        print(f"  {s:<10} ratio={k:8.4f}  flujos={len(rows)}{fx}")
-        tot += len(rows)
-        if apply and rows:
-            sb.table(V3).delete().eq("symbol", s).execute()
-            sb.table(V3).insert(rows).execute()
-    print(f"\n{'Escritas' if apply else 'Se escribirían'} {tot} filas en {V3}.")
+    """Compat: antes sembraba instrument_flows_proyectados como copia de la tabla
+    base. Desde sql/011 las proyecciones viven en columnas de instrument_flows, así
+    que no hay nada que sembrar: proyectar es actualizar 3 columnas in situ."""
+    print("[INFO] --build quedó sin efecto: las proyecciones son columnas de "
+          "instrument_flows desde sql/011. Se ejecuta --project.")
+    return project_once(apply=apply)
+
 
 def project_once(apply=True):
+    """Recalcula las columnas proyectadas de instrument_flows: base × ratio CER.
+
+    Se escribe con upsert en lotes y no con un update por fila. Antes eran ~1.800
+    llamadas HTTP por ciclo, una por flujo; ahora son unas pocas. El id va en el
+    payload, así que el upsert resuelve por clave primaria y actualiza sólo las
+    columnas proyectadas."""
     ctx = ctx_actual()
     if not ctx["cer_t10"]: print("[X] Sin CER(t-10)."); return 0
-    bonos = all_bonds(); n = 0
+    bonos = all_bonds(); n = 0; lote = []
     for b in bonos:
-        s = b["symbol"]; k = ratio_de(b, ctx)
-        rows = sb.table(V3).select("id, interes, amortizacion, total").eq("symbol", s).execute().data or []
+        s_ = b["symbol"]; k = ratio_de(b, ctx)
+        rows = (sb.table(FLOWS).select("id, interes, amortizacion, total")
+                  .eq("symbol", s_).execute().data or [])
         for r in rows:
-            upd = {proy: (None if r.get(base) is None else float(r[base]) * k) for base, proy in zip(BASE, PROY)}
-            if apply: sb.table(V3).update(upd).eq("id", r["id"]).execute()
-            n += 1
+            fila = {"id": r["id"]}
+            fila.update({proy: (None if r.get(base) is None else float(r[base]) * k)
+                         for base, proy in zip(BASE, PROY)})
+            lote.append(fila); n += 1
+    if apply and lote:
+        for i in range(0, len(lote), 500):
+            sb.table(FLOWS).upsert(lote[i:i+500]).execute()
     print(f"[{datetime.now(timezone.utc):%H:%M:%S}] CER(t-10)={ctx['cer_t10']} proyectados: {n} flujos de {len(bonos)} bonos")
     return n
 
