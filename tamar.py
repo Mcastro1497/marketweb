@@ -142,7 +142,7 @@ def cargar_tamar() -> dict:
     return serie
 
 def cargar_instrumentos_tamar():
-    res = (sb.table("instruments_v2")
+    res = (sb.table("instruments")
              .select("*")
              .eq("referencias", "Tamar")
              .eq("is_active", True)

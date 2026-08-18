@@ -52,7 +52,7 @@ PAGE_SIZE    = int(os.getenv("PAGE_SIZE", "1000"))
 CER_LIMIT    = int(os.getenv("CER_SYNC_LIMIT", "60"))
 BCRA_URL     = "https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias/30"  # idVariable 30 = CER
 
-V3   = "instrument_flows_v3"
+V3   = "instrument_flows_proyectados"
 PROY = ("interes_proyectado", "amortizacion_proyectado", "total_proyectado")
 BASE = ("interes", "amortizacion", "total")
 
@@ -169,12 +169,12 @@ def load_cer_value(d: pd.Timestamp) -> Optional[float]:
 
 def all_bonds():
     """Todos los instrumentos activos (para poblar/proyectar v3 completo)."""
-    return sb.table("instruments_v2").select("symbol, referencias, cer_emision, vencimiento") \
+    return sb.table("instruments").select("symbol, referencias, cer_emision, vencimiento") \
              .eq("is_active", True).execute().data or []
 
 def ars_instruments():
     """Universo CER/FIJA para valuar (excluye A3500/Tamar) + price_map (ARS)."""
-    raw = sb.table("instruments_v2").select("symbol, referencias, cer_emision, vencimiento") \
+    raw = sb.table("instruments").select("symbol, referencias, cer_emision, vencimiento") \
             .eq("is_active", True).eq("moneda_pago", "ARS").execute().data or []
     instr = []
     for r in raw:
@@ -194,7 +194,7 @@ def load_flows(cutoff_utc, symbols):
     if not symbols: return pd.DataFrame(columns=["symbol", "fecha_pago", "total"])
     rows, start = [], 0
     while True:
-        data = (sb.table("instrument_flows_v2").select("symbol, fecha_pago, total")
+        data = (sb.table("instrument_flows").select("symbol, fecha_pago, total")
                   .in_("symbol", symbols).gt("fecha_pago", cutoff_utc.date().isoformat())
                   .order("fecha_pago", desc=False).range(start, start+PAGE_SIZE-1).execute().data or [])
         rows.extend(data)
@@ -314,7 +314,7 @@ def build(apply=False):
     DROP = {"id", "created_at"}; tot = 0
     for b in all_bonds():
         s = b["symbol"]; k = ratio_de(b, ctx); fx = " [FIJO]" if es_fijo(b, ctx) else ""
-        base_rows = sb.table("instrument_flows_v2").select("*").eq("symbol", s).execute().data or []
+        base_rows = sb.table("instrument_flows").select("*").eq("symbol", s).execute().data or []
         rows = []
         for r in base_rows:
             row = {kk: vv for kk, vv in r.items() if kk not in DROP}
@@ -373,7 +373,7 @@ def comparar():
     for b in bonos:
         s = b["symbol"]; price = price_map.get(s)
         if not price: print(f"{s:<10} {'sin precio':>11}"); continue
-        ts = tir(price / ratio_de(b, ctx), fetch("instrument_flows_v2", s, "total"))
+        ts = tir(price / ratio_de(b, ctx), fetch("instrument_flows", s, "total"))
         tn = tir(price, fetch(V3, s, "total_proyectado"))
         ss = f"{ts:.4%}" if ts is not None else "—"; sn = f"{tn:.4%}" if tn is not None else "—"
         est = "v3 sin proyectar" if tn is None else ("OK" if ts is not None and abs(ts-tn) < 1e-4 else "DIFERENTE")

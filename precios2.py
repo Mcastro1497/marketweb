@@ -39,7 +39,7 @@ ECO_WS       = os.getenv("ECO_WS",   "wss://api.eco.xoms.com.ar")
 
 DEFAULT_SEG       = os.getenv("DEFAULT_SEGMENT", "24hs").strip()
 PUSH_INTERVAL_SEC = float(os.getenv("PUSH_INTERVAL_SEC", "10"))
-INSTRUMENTS_TABLE = os.getenv("INSTRUMENTS_TABLE", "instruments_v2")
+INSTRUMENTS_TABLE = os.getenv("INSTRUMENTS_TABLE", "instruments")
 PRICES_TABLE      = os.getenv("PRICES_TABLE", "prices")
 
 MEP_PESOS = "AL30"

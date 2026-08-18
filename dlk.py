@@ -176,7 +176,7 @@ def macaulay(cfs_pos, r):
 # ── IO Supabase ───────────────────────────────────────────
 def load_dlk_instruments_and_prices():
     """Trae solo instrumentos DLK activos + sus precios en ARS."""
-    rows = sb.table("instruments_v2") \
+    rows = sb.table("instruments") \
              .select("symbol, instrument_type") \
              .eq("is_active", True) \
              .eq("instrument_type", "DLK") \
@@ -202,7 +202,7 @@ def load_flows(cutoff_utc: datetime, symbols: List[str]) -> pd.DataFrame:
         chunk = symbols[i:i+chunk_size]
         start = 0
         while True:
-            data = (sb.table("instrument_flows_v2")
+            data = (sb.table("instrument_flows")
                       .select("symbol, fecha_pago, total")
                       .in_("symbol", chunk)
                       .gt("fecha_pago", cutoff_utc.date().isoformat())

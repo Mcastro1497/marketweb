@@ -654,7 +654,7 @@ def breakeven(motor, ctx, inst, p, esc, objetivo: float, bounds) -> Optional[flo
 
 # ════════════════════════════ carga ════════════════════════════
 def cargar_instrumentos(symbols=None) -> dict:
-    q = sb.table("instruments_v2").select("*").eq("is_active", True)
+    q = sb.table("instruments").select("*").eq("is_active", True)
     if symbols:
         q = q.in_("symbol", symbols)
     out = {}

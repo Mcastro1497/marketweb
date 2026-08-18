@@ -31,7 +31,7 @@ if not (ECO_USER and ECO_PASS and ECO_ACCT):
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SERVICE_KEY  = os.getenv("SERVICE_KEY")
-TABLE        = os.getenv("INSTRUMENTS_TABLE", "instruments_v2")
+TABLE        = os.getenv("INSTRUMENTS_TABLE", "instruments")
 
 
 def ticker_limpio(full):

@@ -81,7 +81,7 @@ def build_rows(df):
     return rows, descartados
 
 
-def chequeo_huerfanos(sb, rows, instruments_table="instruments_v2"):
+def chequeo_huerfanos(sb, rows, instruments_table="instruments"):
     """Compara los símbolos de los flujos contra instruments_v2 e informa
     qué símbolos del calendario NO existen como bono (flujos huérfanos),
     y qué bonos de instruments_v2 se quedan sin ningún flujo."""
@@ -107,8 +107,8 @@ def chequeo_huerfanos(sb, rows, instruments_table="instruments_v2"):
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("archivo")
-    ap.add_argument("--table", default="instrument_flows_v2")
-    ap.add_argument("--instruments-table", default="instruments_v2")
+    ap.add_argument("--table", default="instrument_flows")
+    ap.add_argument("--instruments-table", default="instruments")
     ap.add_argument("--dry-run", action="store_true")
     args=ap.parse_args()
 
