@@ -10,8 +10,10 @@ Hace TODO:
   - Lógica de "bono fijo": si hoy ya pasó el t-10 del vencimiento, el CER del
     pago final ya está publicado -> el bono es determinístico; se usa el CER del
     vto (no el de hoy) y se marca prices.cer_fixed = true.
-  - Mantiene instrument_flows_v3: réplica de v2 (base) + columnas proyectadas en
-    pesos (interes/amortizacion/total _proyectado = base × ratio CER).
+  - Mantiene instrument_flows_v3: NO es una réplica completa de v2. Cubre los
+    soberanos ARS y las ONs que operan (v2 tiene 75 símbolos más, ilíquidos, que
+    se dejan afuera a propósito), con las columnas proyectadas en pesos
+    (interes/amortizacion/total _proyectado = base × ratio CER).
 
 Uso:
   .venv/bin/python cerv2.py                 # daemon: cada INTERVAL hace sync + valúa + proyecta v3
