@@ -91,18 +91,22 @@ def get_last_fx() -> Optional[float]:
     return None
 
 def get_fx_oficial() -> Optional[float]:
-    """Intenta MAE primero; si falla, usa el último guardado."""
-    fx = fetch_fx_mae()
-    if fx is not None:
-        upsert_fx(fx)
-        print(f"[OK] FX MAE = {fx:,.4f}  (guardado en prices.{FX_SYMBOL})")
-        return fx
-    fx = get_last_fx()
-    if fx is not None:
-        print(f"[INFO] MAE no disponible — usando último FX guardado = {fx:,.4f}")
-        return fx
-    print("[ERROR] No hay FX disponible ni en MAE ni en DB. Skip ciclo.")
-    return None
+    """MAE intradiario y, si no responde, el A3500 del BCRA.
+
+    Ya NO cae al último valor guardado. MAE devuelve 403 a los runners de GitHub
+    —bloquea IPs no argentinas—, así que ese fallback se activaba en cada corrida
+    en la nube y dejaba el FX clavado en lo que hubiera escrito la última corrida
+    local, en verde y sin avisar. Ver lib/fx.py.
+    """
+    from lib.fx import spot
+    s = spot(mae_fn=fetch_fx_mae)
+    if s is None:
+        print("[ERROR] No hay FX ni en MAE ni en la serie A3500. Skip ciclo.")
+        return None
+    upsert_fx(s.valor)
+    origen = "MAE (intradiario)" if s.fuente == "MAE" else f"A3500 BCRA del {s.fecha}"
+    print(f"[OK] FX = {s.valor:,.4f} — {origen}  (guardado en prices.{FX_SYMBOL})")
+    return s.valor
 
 # ── Calendario ────────────────────────────────────────────
 def load_holidays() -> Set[dtdate]:
