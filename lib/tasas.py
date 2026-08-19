@@ -120,3 +120,30 @@ def dias360(d1, d2) -> int:
 def meses360(d1, d2) -> float:
     """Exponente (DÍAS/360)*12 de la fórmula del prospecto."""
     return dias360(d1, d2) / 30.0
+
+
+def tir_y_duracion(fecha_val, precio: float, flujos):
+    """TIR y duración de Macaulay de un bono bullet o con cupones.
+
+    fecha_val: datetime de liquidación (el flujo negativo).
+    precio:    ya AJUSTADO por quien llama. Es lo único que cambia entre motores:
+               tir.py y dlk.py pasan el precio en dólares, cerv2.py pasa el precio
+               deflactado por el ratio CER, y por eso la TIR sale en la convención
+               de cada uno. El cálculo de acá es el mismo para los tres.
+    flujos:    [(datetime, monto)] futuros, sin el precio.
+
+    Devuelve (ytm, duration_y) o (None, None) si no converge.
+
+    Estaba repetido tal cual dentro del bucle de cerv2.py, dlk.py y tir.py. Se
+    unifica para que el bucle de revaluación continua use exactamente el mismo
+    código que los motores y no puedan divergir.
+    """
+    cfs = [(fecha_val, -float(precio))]
+    cfs += [(d, float(m)) for d, m in flujos if float(m) != 0]
+    if len(cfs) < 2:
+        return None, None
+    r = xirr(cfs, 0.10)
+    if r is None or r != r or r in (float("inf"), float("-inf")):
+        return None, None
+    pos = [(_yf(fecha_val, d), float(m)) for d, m in flujos if float(m) != 0]
+    return r, macaulay(pos, r)

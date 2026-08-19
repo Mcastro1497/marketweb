@@ -76,8 +76,12 @@ PASOS = [
      "ON y hard dollar: TIR en dólares", False, "rueda"),
     ("tamar",  [PY, "tamar.py", "--once"],
      "Bonos TAMAR: columnas TAMAR de prices", False, "rueda"),
+    # patas queda en "diario" y no en "rueda": durante la rueda lo hace
+    # valuar_loop.py, que cachea la referencia y revalúa cada pocos segundos en
+    # vez de cada 15 minutos. Acá sigue para dejar el cierre consolidado y por si
+    # el bucle no corrió.
     ("patas",  [PY, "patas.py"],
-     "Patas y duales: valuations + prices.ytm_ars. SIEMPRE AL FINAL", False, "rueda"),
+     "Patas y duales: valuations + prices.ytm_ars. SIEMPRE AL FINAL", False, "diario"),
 ]
 
 
