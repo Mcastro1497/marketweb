@@ -1,0 +1,44 @@
+# Revaluación durante la rueda.
+#
+# Corre run.py --rueda: sólo los pasos que dependen del precio (cerv2, dlk, tir,
+# tamar, patas). Saltea series y REM, que no cambian dentro del día — el CER
+# diario se publica una vez y el REM una vez por mes, así que volver a pedirlos
+# en cada ciclo son 12 segundos tirados y carga inútil sobre el BCRA.
+#
+# ~26 segundos por corrida contra los ~38 del pipeline completo.
+#
+# OJO CON LA FRECUENCIA: el mínimo de GitHub es 5 minutos y en la práctica los
+# cron se demoran (medimos 35 minutos un día). Si hace falta refrescar de verdad
+# cada pocos segundos, esto NO alcanza: hay que hacerlo con un proceso que
+# mantenga en memoria instrumentos, flujos y series, y recalcule sólo lo que
+# cambió de precio.
+name: Valuaciones rueda
+
+on:
+  schedule:
+    # Cada 15 minutos entre las 13:00 y las 20:45 UTC (10:00 a 17:45 ART).
+    - cron: "*/15 13-20 * * 1-5"
+  workflow_dispatch:
+
+concurrency:
+  group: valuaciones
+  cancel-in-progress: true    # si una corrida se solapa, vale la más nueva
+
+jobs:
+  valuar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Revaluar contra los precios del momento
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SERVICE_KEY:  ${{ secrets.SERVICE_KEY }}
+          LOCAL_TZ:     ${{ secrets.LOCAL_TZ }}
+          MAE_API_KEY:  ${{ secrets.MAE_API_KEY }}
+        run: python run.py --rueda --verbose

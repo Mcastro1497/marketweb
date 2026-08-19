@@ -38,7 +38,9 @@ def _get_tz():
 LOCAL_TZ      = _get_tz()
 SUPABASE_URL  = os.getenv("SUPABASE_URL")
 SERVICE_KEY   = os.getenv("SERVICE_KEY")
-MAE_API_KEY   = os.getenv("MAE_API_KEY", "nuDX73vj2483KSUgvenkj9t50oA0vgvA4WcuRAER")
+# Sin default: la key vive en el .env local y en los secrets del repo. Tenerla
+# hardcodeada acá la publicó en GitHub. Si falta, se avisa y se sigue sin MAE.
+MAE_API_KEY   = os.getenv("MAE_API_KEY", "")
 INTERVAL_SEC  = float(os.getenv("INTERVAL_SEC", "10"))
 DEBUG_TICKER  = (os.getenv("DEBUG_TICKER") or "").strip().upper() or None
 PAGE_SIZE     = int(os.getenv("PAGE_SIZE", "1000"))
@@ -52,12 +54,24 @@ sb = create_client(SUPABASE_URL, SERVICE_KEY)
 
 # ── MAE FX ────────────────────────────────────────────────
 def fetch_fx_mae() -> Optional[float]:
-    """Trae el precio del dólar oficial desde MAE. None si falla."""
+    """Precio del dólar oficial desde MAE, en tiempo real. None si falla."""
+    if not MAE_API_KEY:
+        print("[WARN] Falta MAE_API_KEY: no se consulta MAE.")
+        return None
     try:
         r = requests.get(
             MAE_URL,
             params={"ticker": MAE_TICKER},
-            headers={"x-api-key": MAE_API_KEY},
+            headers={
+                "x-api-key": MAE_API_KEY,
+                # Sin User-Agent de navegador, el WAF de MAE devuelve 403 a los
+                # runners de GitHub: requests manda "python-requests/2.x" y el
+                # bot-manager lo bloquea. La página de error es la de Akamai.
+                "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/126.0 Safari/537.36"),
+                "Accept": "application/json",
+            },
             timeout=MAE_TIMEOUT,
         )
         if r.status_code != 200:

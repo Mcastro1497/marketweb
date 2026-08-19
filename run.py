@@ -37,6 +37,7 @@ Uso:
     python run.py --solo patas       # un paso
     python run.py --desde cerv2      # desde ese paso en adelante
     python run.py --saltear rem      # omite pasos
+    python run.py --rueda            # sólo lo que depende del precio (~26s)
 """
 import argparse
 import subprocess
@@ -52,29 +53,36 @@ RAIZ = Path(__file__).resolve().parent
 _VENV = RAIZ / ".venv" / "bin" / "python"
 PY = str(_VENV) if _VENV.exists() else sys.executable
 
-# (nombre, comando, descripción, opcional)
-# opcional=True: si falla, se reporta pero no tumba la corrida. Se usa para lo
-# que depende de fuentes externas que pueden no estar disponibles ese día.
+# (nombre, comando, descripción, opcional, tramo)
+#
+# opcional=True: si falla se reporta pero no tumba la corrida.
+#
+# tramo distingue QUÉ TAN SEGUIDO tiene sentido correr cada paso:
+#   "diario"  Datos de referencia que NO cambian dentro del día. El CER del día
+#             se publica una vez, el REM una vez por mes. Volver a pedirlos en
+#             cada ciclo son 12 segundos tirados y carga inútil sobre el BCRA.
+#   "rueda"   Depende del precio, así que cambia todo el tiempo. Es lo único que
+#             tiene sentido recalcular seguido.
 PASOS = [
     ("series", [PY, "series_sync.py"],
-     "Series del BCRA (cer, tamar_tna, a3500, ipc_mensual)", False),
+     "Series del BCRA (cer, tamar_tna, a3500, ipc_mensual)", False, "diario"),
     ("rem",    [PY, "rem_sync.py"],
-     "REM del BCRA. Es mensual: casi siempre no hay nada nuevo", True),
+     "REM del BCRA. Es mensual: casi siempre no hay nada nuevo", True, "diario"),
     ("cerv2",  [PY, "cerv2.py", "--once"],
-     "Proyección CER de los flujos + valuación de soberanos ARS", False),
+     "Proyección CER de los flujos + valuación de soberanos ARS", False, "rueda"),
     ("dlk",    [PY, "dlk.py", "--once"],
-     "Dólar linked: TIR en dólares", False),
+     "Dólar linked: TIR en dólares", False, "rueda"),
     ("tir",    [PY, "tir.py", "--once"],
-     "ON y hard dollar: TIR en dólares", False),
+     "ON y hard dollar: TIR en dólares", False, "rueda"),
     ("tamar",  [PY, "tamar.py", "--once"],
-     "Bonos TAMAR: columnas TAMAR de prices", False),
+     "Bonos TAMAR: columnas TAMAR de prices", False, "rueda"),
     ("patas",  [PY, "patas.py"],
-     "Patas y duales: valuations + prices.ytm_ars. SIEMPRE AL FINAL", False),
+     "Patas y duales: valuations + prices.ytm_ars. SIEMPRE AL FINAL", False, "rueda"),
 ]
 
 
 def correr(paso, args) -> tuple:
-    nombre, cmd, desc, opcional = paso
+    nombre, cmd, desc, opcional, _tramo = paso
     print(f"\n{'─' * 70}\n▶ {nombre}  —  {desc}")
     if args.dry_run:
         print(f"  (dry-run) {' '.join(cmd)}")
@@ -114,11 +122,16 @@ def main():
     ap.add_argument("--solo", help="correr sólo este paso")
     ap.add_argument("--desde", help="empezar desde este paso")
     ap.add_argument("--saltear", default="", help="pasos a omitir, separados por coma")
+    ap.add_argument("--rueda", action="store_true",
+                    help="sólo los pasos que dependen del precio; saltea las series y el "
+                         "REM, que no cambian dentro del día. Es el modo para correr seguido.")
     ap.add_argument("--verbose", action="store_true", help="muestra la salida completa de cada paso")
     ap.add_argument("--timeout", type=int, default=1800, help="segundos por paso (default 1800)")
     args = ap.parse_args()
 
     pasos = PASOS
+    if args.rueda:
+        pasos = [p for p in pasos if p[4] == "rueda"]
     if args.solo:
         pasos = [p for p in pasos if p[0] == args.solo]
         if not pasos:
