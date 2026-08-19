@@ -12,8 +12,12 @@ name: Precios tarde
 on:
   schedule:
     # Los cron de GitHub son en UTC y NO ajustan por horario de verano.
-    # 16:25 UTC = 13:25 en Argentina (UTC-3, sin DST).
-    - cron: "25 16 * * 1-5"
+    # 16:00 UTC = 13:00 en Argentina (UTC-3, sin DST).
+    #
+    # Mismo criterio que el de la mañana: se adelanta para absorber la demora del
+    # cron de GitHub. El de la mañana termina 13:30, así que arrancar a las 13:00
+    # da media hora de colchón para el empalme en vez de cinco minutos.
+    - cron: "0 16 * * 1-5"
   workflow_dispatch:
 
 concurrency:
@@ -23,8 +27,9 @@ concurrency:
 jobs:
   precios:
     runs-on: ubuntu-latest
-    # Red de seguridad por si --hasta fallara: el job se corta igual.
-    timeout-minutes: 260
+    # Red de seguridad por si --hasta fallara. Mayor que la ventana real
+    # (13:00 -> 17:15 son 255 minutos), y por debajo del tope de 6 horas de GitHub.
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 

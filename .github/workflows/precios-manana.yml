@@ -11,8 +11,14 @@ name: Precios mañana
 on:
   schedule:
     # Los cron de GitHub son en UTC y NO ajustan por horario de verano.
-    # 13:30 UTC = 10:30 en Argentina (UTC-3, sin DST).
-    - cron: "30 13 * * 1-5"
+    # 13:00 UTC = 10:00 en Argentina (UTC-3, sin DST).
+    #
+    # Se pide media hora ANTES de la apertura a propósito: GitHub no dispara los
+    # cron puntuales. El 19-08-2026 este mismo job estaba programado 13:30 y
+    # arrancó 14:05 — 35 minutos tarde, se comió la primera media hora de rueda.
+    # Adelantándolo, aun con demora típica arranca cerca de la campana; y si
+    # arranca puntual, sólo espera unos minutos sin ticks, que no cuesta nada.
+    - cron: "0 13 * * 1-5"
   workflow_dispatch:
 
 concurrency:
@@ -22,8 +28,10 @@ concurrency:
 jobs:
   precios:
     runs-on: ubuntu-latest
-    # Red de seguridad por si --hasta fallara: el job se corta igual.
-    timeout-minutes: 210
+    # Red de seguridad por si --hasta fallara. Tiene que ser MAYOR que la ventana
+    # real (10:00 -> 13:30 son 210 minutos justos), o el timeout mataría el job
+    # justo antes de que --hasta lo apague por su cuenta.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
 
