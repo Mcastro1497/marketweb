@@ -1,0 +1,8 @@
+# Dependencias del backend. Las usa GitHub Actions para armar el entorno; en
+# local el entorno es .venv/ y no se versiona.
+supabase
+python-dotenv
+requests
+pandas
+openpyxl
+pyRofex

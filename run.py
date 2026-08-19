@@ -20,9 +20,10 @@ El pipeline es una cadena de dependencias reales, no una lista arbitraria:
     REM. Correrlo antes deja la TIR en NULL o la calcula con datos viejos.
 
 QUÉ NO ESTÁ ACÁ: precios2.py
-Es un websocket contra ECO. Tiene que estar CONECTADO durante la rueda, no
-ejecutarse una vez, así que no es "croneable": va como proceso largo aparte. Es
-la única pieza del sistema que no encaja en un scheduler.
+Es un websocket contra ECO: suscribe una vez y después el proceso sólo espera
+mientras el handler recibe los ticks. Sí es programable —arranca a la apertura,
+vive la rueda y con --hasta se apaga solo al cierre—, pero no es un job que corre
+y sale en segundos como estos siete, así que va en su propio workflow.
 
 POR QUÉ ESTO EVITA EL PROBLEMA DE LOS DAEMONS
 Con seis procesos de larga vida, cada cambio de esquema obliga a acordarse de
@@ -45,7 +46,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parent
-PY = str(RAIZ / ".venv" / "bin" / "python")
+
+# En local los scripts corren con el intérprete de .venv; en un runner de CI ese
+# directorio no existe y hay que usar el python que ya está ejecutando esto.
+_VENV = RAIZ / ".venv" / "bin" / "python"
+PY = str(_VENV) if _VENV.exists() else sys.executable
 
 # (nombre, comando, descripción, opcional)
 # opcional=True: si falla, se reporta pero no tumba la corrida. Se usa para lo

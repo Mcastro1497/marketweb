@@ -1,0 +1,49 @@
+# precios2.py durante la rueda, mañana.
+#
+# El proceso suscribe al websocket de ECO una sola vez y después sólo espera:
+# el handler recibe los ticks y los empuja a `prices`. Con --hasta se apaga solo,
+# así que no queda como daemon.
+#
+# Va partido en dos jobs porque GitHub corta cualquier job a las 6 horas y la
+# rueda dura casi 7. Este cubre de la apertura al mediodía.
+name: Precios mañana
+
+on:
+  schedule:
+    # Los cron de GitHub son en UTC y NO ajustan por horario de verano.
+    # 13:30 UTC = 10:30 en Argentina (UTC-3, sin DST).
+    - cron: "30 13 * * 1-5"
+  workflow_dispatch:
+
+concurrency:
+  group: precios-manana
+  cancel-in-progress: false
+
+jobs:
+  precios:
+    runs-on: ubuntu-latest
+    # Red de seguridad por si --hasta fallara: el job se corta igual.
+    timeout-minutes: 210
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Recibir precios hasta las 13:30
+        env:
+          SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
+          SERVICE_KEY:       ${{ secrets.SERVICE_KEY }}
+          ECO_USER:          ${{ secrets.ECO_USER }}
+          ECO_PASS:          ${{ secrets.ECO_PASS }}
+          ECO_ACCT:          ${{ secrets.ECO_ACCT }}
+          ECO_BASE:          ${{ secrets.ECO_BASE }}
+          ECO_WS:            ${{ secrets.ECO_WS }}
+          DEFAULT_SEGMENT:   ${{ secrets.DEFAULT_SEGMENT }}
+          PUSH_INTERVAL_SEC: ${{ secrets.PUSH_INTERVAL_SEC }}
+          LOCAL_TZ:          ${{ secrets.LOCAL_TZ }}
+        run: python precios2.py --hasta 13:30
