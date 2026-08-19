@@ -1,27 +1,11 @@
 -- ============================================================================
--- 010_drop_compat.sql
+-- 010_drop_compat.sql — SIN EFECTO, se conserva por orden de numeración.
 --
--- Retira las vistas de compatibilidad que dejó 009.
+-- Iba a retirar las vistas instruments_v2, instrument_flows_v2 e
+-- instrument_flows_v3 que dejaba el 009. Nunca llegaron a existir: el 009 se
+-- corrió sin la parte que las creaba, y por eso el front tiró
+-- "Could not find the table public.instruments_v2" hasta que se deployó el
+-- código nuevo.
 --
--- CORRER SÓLO cuando hayas verificado que todo anda con los nombres nuevos:
---   · las 6 páginas del front (ons, cartera, duales, soberanos, soberanos-ars, dlk)
---   · un ciclo completo de los motores (cerv2, dlk, tir, tamar, patas, precios2)
---   · lo que tengas fuera de estos dos repos y yo no puedo ver: queries guardadas
---     en el SQL editor, n8n, Metabase, notebooks, planillas contra la API
---
--- Ese último punto es justamente el motivo de que las vistas existan. Mientras
--- estén, algo que use un nombre viejo sigue funcionando en silencio; después de
--- esto, falla. Y si no estás seguro, no hay ningún apuro: son vistas, no copias,
--- así que no ocupan espacio ni se desincronizan.
---
--- Idempotente.
+-- La limpieza que sí correspondía está en 016_limpieza_final.sql.
 -- ============================================================================
-
-drop view if exists instrument_flows_v2;
-drop view if exists instrument_flows_v3;
-drop view if exists instruments_v2;
-
--- Verificación: no debería quedar ningún objeto con sufijo de versión.
---   select table_name, table_type from information_schema.tables
---    where table_schema = 'public' and table_name ~ '_v[0-9]+$'
---    order by 1;

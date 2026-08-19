@@ -39,6 +39,11 @@ INTERVAL_SEC = int(os.getenv("SERIES_INTERVAL_SEC", "3600"))
 DIAS_INICIAL = int(os.getenv("SERIES_DIAS_INICIAL", "1100"))   # ~3 años
 # Solapamiento al sincronizar incremental: el BCRA a veces corrige días previos.
 DIAS_SOLAPE = 5
+# El CER se publica POR ADELANTADO: al 19-08-2026 el BCRA ya tenía valores hasta
+# el 15-09. Cortar en "hoy" los perdía, y no son decorativos: cerv2 mira el CER de
+# 10 días hábiles antes del vencimiento para decidir si un bono ya quedó
+# determinístico, así que para los que vencen pronto ese tramo futuro hace falta.
+DIAS_ADELANTE = 60
 
 
 def catalogo(solo=None):
@@ -80,6 +85,9 @@ def bajar(fuente_id: str, desde: date, hasta: date) -> list:
 def sync_una(d: dict, args) -> int:
     serie, fid = d["serie"], d["fuente_id"]
     hoy = date.today()
+    # Se pide más allá de hoy para no perder lo que la fuente publica adelantado.
+    # Si no hay nada futuro, la API simplemente devuelve hasta donde tiene.
+    hasta = hoy + timedelta(days=DIAS_ADELANTE)
 
     if args.desde:
         desde = date.fromisoformat(args.desde)
@@ -88,10 +96,12 @@ def sync_una(d: dict, args) -> int:
     else:
         ult = ultima_fecha(serie)
         # El solape cubre las correcciones que el BCRA publica sobre días previos.
-        desde = (ult - timedelta(days=DIAS_SOLAPE)) if ult else hoy - timedelta(days=DIAS_INICIAL)
+        # Se resta también DIAS_ADELANTE porque `ult` puede ser una fecha futura.
+        base = min(ult, hoy) if ult else hoy - timedelta(days=DIAS_INICIAL)
+        desde = base - timedelta(days=DIAS_SOLAPE)
 
     try:
-        datos = bajar(fid, desde, hoy)
+        datos = bajar(fid, desde, hasta)
     except Exception as e:
         print(f"  [ERROR] {serie}: {str(e)[:80]}")
         return 0
