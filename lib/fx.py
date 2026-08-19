@@ -17,12 +17,22 @@ Cuanto más corto el bono, más brutal. Publicar la mitad de la TIR de un bono
 corto es peor que no publicarla.
 
 LA CADENA
-  1. MAE        intradiario y autoritativo, pero sólo responde desde Argentina.
-  2. dolarapi   API pública, gratis y sin key, que expone el mayorista. Hoy da
-                1497,00 contra los 1497,00 de MAE: coincidencia exacta. Responde
-                desde cualquier lado, así que es la que salva la nube. Trae
-                fechaActualizacion, o sea que se puede medir cuán viejo es.
+  1. dolarapi   API pública, gratis y sin key, que expone el mayorista. Da el
+                MISMO valor que MAE (1497,00 contra 1497,00) y responde desde
+                cualquier lado. Trae fechaActualizacion, o sea que la antigüedad
+                se mide en vez de suponerse.
+  2. MAE        respaldo. Es la fuente autoritativa, pero sólo contesta desde
+                Argentina y necesita API key.
   3. A3500      cierre diario del BCRA, de la tabla series. Último recurso.
+
+VA PRIMERO DOLARAPI, Y NO MAE, A PROPÓSITO. Si cada entorno usa una fuente
+distinta —MAE en tu máquina, dolarapi en la nube—, los dos pueden discrepar y
+nadie se entera. Con dolarapi primero, local y nube calculan sobre el mismo dato
+y el resultado es reproducible. Cuando MAE está disponible se consulta igual, a
+modo de control: si difieren, se avisa.
+
+El mayorista cierra a las 15:00, así que después de esa hora el dato deja de
+moverse y una antigüedad de varias horas es lo normal, no una falla.
 
 Se prefiere una API pública documentada antes que scrapear HTML: no se rompe con
 un cambio de maquetado y está pensada para consumirse.
@@ -31,11 +41,30 @@ Siempre se devuelve de dónde salió el dato y de cuándo es, para que el que lo
 pueda decidir y para que quede asentado.
 """
 import json
+import os
 import urllib.request
 from datetime import date, datetime, timezone
 from typing import NamedTuple, Optional
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
+
 from . import series
+
+
+def _tz_ar():
+    """Zona horaria argentina, de LOCAL_TZ. NO se usa la del sistema: en un
+    runner de GitHub es UTC, y el chequeo de "¿todavía opera el mayorista?"
+    daría mal por tres horas."""
+    nombre = os.getenv("LOCAL_TZ", "America/Argentina/Cordoba")
+    if ZoneInfo:
+        try:
+            return ZoneInfo(nombre)
+        except Exception:
+            pass
+    return timezone.utc
 
 DOLARAPI_URL = "https://dolarapi.com/v1/dolares/mayorista"
 TIMEOUT = 10
@@ -86,22 +115,44 @@ def desde_a3500() -> Optional[Spot]:
     return Spot(v, "A3500", momento, f)
 
 
+# El mayorista opera hasta las 15:00 hora argentina. Pasada esa hora el último
+# valor es el cierre y no se mueve más, así que "viejo" sólo es sospechoso
+# durante la rueda.
+CIERRE_MAYORISTA_H = 15
+ANTIGUEDAD_ALERTA_MIN = 45
+
+
 def spot(mae_fn=None) -> Optional[Spot]:
     """Cadena completa. `mae_fn` consulta MAE; se pasa desde afuera para no
     duplicar acá las credenciales y el endpoint que ya tiene dlk.py."""
+    s = desde_dolarapi()
+
+    # MAE, cuando está disponible, se usa de CONTROL: si difiere del mayorista
+    # público es señal de que una de las dos fuentes se quedó.
     if mae_fn is not None:
         try:
             v = mae_fn()
             if v:
-                return Spot(float(v), "MAE", datetime.now(timezone.utc), None)
+                v = float(v)
+                if s and abs(v / s.valor - 1) > 0.002:
+                    print(f"[FX] OJO: MAE {v:,.4f} y dolarapi {s.valor:,.4f} difieren "
+                          f"{(v / s.valor - 1) * 100:+.2f}%. Se usa MAE, que es la fuente "
+                          f"autoritativa.")
+                    return Spot(v, "MAE", datetime.now(timezone.utc), None)
+                if not s:
+                    return Spot(v, "MAE", datetime.now(timezone.utc), None)
         except Exception as e:
-            print(f"[FX] MAE falló: {str(e)[:80]}")
+            print(f"[FX] MAE no respondió ({str(e)[:60]}); se sigue con dolarapi.")
 
-    s = desde_dolarapi()
     if s:
         edad = s.antiguedad_min
-        extra = f", actualizado hace {edad:.0f} min" if edad is not None else ""
-        print(f"[FX] MAE no disponible — dolarapi mayorista = {s.valor:,.4f}{extra}")
+        extra = f", hace {edad:.0f} min" if edad is not None else ""
+        print(f"[FX] dolarapi mayorista = {s.valor:,.4f}{extra}")
+        if edad is not None and edad > ANTIGUEDAD_ALERTA_MIN:
+            ahora_ar = datetime.now(_tz_ar())
+            if ahora_ar.hour < CIERRE_MAYORISTA_H:
+                print(f"[FX] AVISO: el dato tiene {edad:.0f} min y el mayorista todavía "
+                      f"opera. Puede estar retrasado.")
         return s
 
     s = desde_a3500()
