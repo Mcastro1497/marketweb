@@ -1,0 +1,45 @@
+# valuar_loop.py durante la rueda, mañana.
+#
+# Revalúa TODO el universo cada pocos segundos: patas y duales por fórmula
+# cerrada, y ONs, hard dollar, dólar linked y soberanos ARS por XIRR sobre flujos.
+# Un ciclo completo son ~0,8 segundos sobre 273 bonos.
+#
+# Carga instrumentos, series y REM UNA VEZ y después sólo relee precios. El 94%
+# del tiempo de una corrida suelta se iba releyendo datos que no cambian dentro
+# del día; por eso esto puede correr cada 5 segundos y run.py no.
+#
+# Va partido en dos jobs por el tope de 6 horas de GitHub, igual que precios.
+# Este cubre de la apertura al mediodía.
+name: Valuar loop mañana
+
+on:
+  schedule:
+    # Cron en UTC, sin ajuste por horario de verano. 13:00 UTC = 10:00 ART.
+    - cron: "0 13 * * 1-5"
+  workflow_dispatch:
+
+concurrency:
+  group: valuar-loop-manana
+  cancel-in-progress: false
+
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Revaluar en continuo hasta las 13:30
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SERVICE_KEY:  ${{ secrets.SERVICE_KEY }}
+          LOCAL_TZ:     ${{ secrets.LOCAL_TZ }}
+          MAE_API_KEY:  ${{ secrets.MAE_API_KEY }}
+        # --intervalo 5: el ciclo tarda 0,8s, así que hay margen de sobra.
+        # --refresco 30: recarga instrumentos, series y REM, para no perderse el
+        #   CER del día si el BCRA lo publica con el mercado abierto.
+        run: python valuar_loop.py --intervalo 5 --refresco 30 --hasta 13:30

@@ -16,8 +16,10 @@ name: Valuaciones rueda
 
 on:
   schedule:
-    # Cada 15 minutos entre las 13:00 y las 20:45 UTC (10:00 a 17:45 ART).
-    - cron: "*/15 13-20 * * 1-5"
+    # Cada hora, no cada 15 minutos: la revaluación fina la hace valuar_loop cada
+    # 5 segundos. Esto queda como red por si el bucle se cayó, y para cubrir lo
+    # que el bucle todavía no toca.
+    - cron: "20 13-20 * * 1-5"
   workflow_dispatch:
 
 concurrency:
