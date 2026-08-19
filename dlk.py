@@ -115,11 +115,12 @@ def get_fx_oficial() -> Optional[float]:
     from lib.fx import spot
     s = spot(mae_fn=fetch_fx_mae)
     if s is None:
-        print("[ERROR] No hay FX ni en MAE ni en la serie A3500. Skip ciclo.")
+        print("[ERROR] No hay FX por ninguna fuente. Skip ciclo.")
         return None
     upsert_fx(s.valor)
-    origen = "MAE (intradiario)" if s.fuente == "MAE" else f"A3500 BCRA del {s.fecha}"
-    print(f"[OK] FX = {s.valor:,.4f} — {origen}  (guardado en prices.{FX_SYMBOL})")
+    edad = s.antiguedad_min
+    detalle = f"{s.fuente}" + (f", hace {edad:.0f} min" if edad is not None else "")
+    print(f"[OK] FX = {s.valor:,.4f} — {detalle}  (guardado en prices.{FX_SYMBOL})")
     return s.valor
 
 # ── Calendario ────────────────────────────────────────────
