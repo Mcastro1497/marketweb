@@ -283,8 +283,17 @@ def ciclo(ref: Referencia, previos: dict, args) -> tuple:
     if not args.dry_run:
         for i in range(0, len(filas_val), 500):
             P.sb.table("valuations").upsert(filas_val[i:i + 500]).execute()
-        for i in range(0, len(filas_px), 500):
-            P.sb.table("prices").upsert(filas_px[i:i + 500]).execute()
+        # El upsert de PostgREST arma las columnas con la UNIÓN de las claves del
+        # lote. Una fila no-dual, que va sin "ytm", metida junto a una dual que sí
+        # la trae, termina escribiendo NULL sobre la TIR que dejó dlk.py — y con
+        # ella se borraba la TIR en USD de los dólar linked en cada ciclo.
+        # Por eso el lote se parte por juego de claves: cada grupo va con las suyas.
+        grupos: dict = {}
+        for fila in filas_px:
+            grupos.setdefault(frozenset(fila), []).append(fila)
+        for filas in grupos.values():
+            for i in range(0, len(filas), 500):
+                P.sb.table("prices").upsert(filas[i:i + 500]).execute()
 
     return precios, len(cambiados), time.monotonic() - t0
 
