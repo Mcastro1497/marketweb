@@ -71,7 +71,28 @@ except ImportError:
 
 import os
 
+import httpx
+from supabase import create_client
+
 _corriendo = True
+
+
+def _reconectar():
+    """Rehace el cliente de Supabase después de un cierre de conexión.
+
+    El cliente mantiene UNA conexión HTTP/2 y manda todo por ahí. A los ~20.000
+    streams el servidor manda un GOAWAY limpio (error_code 0) esperando que el
+    cliente abra otra; httpx no lo hace solo, levanta RemoteProtocolError y el
+    proceso se moría. Pasó el 20-08-2026: la corrida de la mañana se cayó a las
+    2h48 de una ventana de 2h51, con last_stream_id 19999.
+
+    patas.py y dlk.py crean su cliente a nivel de módulo, así que no alcanza con
+    limpiar un cache: hay que reasignarlo donde está bindeado.
+    """
+    nuevo = create_client(os.environ["SUPABASE_URL"], os.environ["SERVICE_KEY"])
+    P.sb = nuevo
+    D.sb = nuevo
+    return nuevo
 
 
 def _tz():
@@ -390,12 +411,20 @@ def main():
             print("[REF] recargando referencia…")
             ref.cargar()
 
-        previos, n, dt = ciclo(ref, previos, args)
-        nf, dtf = 0, 0.0
-        if ref_f:
-            if ref_f.vencida(args.refresco):
-                ref_f.cargar()
-            previos_f, nf, dtf = ciclo_flujos(ref_f, previos_f, args)
+        try:
+            previos, n, dt = ciclo(ref, previos, args)
+            nf, dtf = 0, 0.0
+            if ref_f:
+                if ref_f.vencida(args.refresco):
+                    ref_f.cargar()
+                previos_f, nf, dtf = ciclo_flujos(ref_f, previos_f, args)
+        except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError) as e:
+            # Cortar la rueda entera por una conexión caída no tiene sentido: se
+            # rehace el cliente y el ciclo siguiente sigue como si nada.
+            print(f"[RECONECT] conexión con Supabase caída ({type(e).__name__}): {str(e)[:90]}")
+            _reconectar()
+            time.sleep(args.intervalo)
+            continue
         n_ciclos += 1
         total_reval += n + nf
         if n or nf:
