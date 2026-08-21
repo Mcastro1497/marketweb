@@ -392,9 +392,19 @@ def motor_tamar(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
     if not ventana:
         raise ValueError("ventana de TAMAR vacía")
 
+    # Un día hábil de la ventana sin dato en la serie NO es futuro: es un día en
+    # el que el BCRA no publicó (feriado que falta en `holidays`, o un bache del
+    # sync). Contarlo como proyectado lo valuaba a la TNA futura y arrastraba el
+    # promedio: el 21-08-2026 eso le sacaba 13 puntos de TEA a TTS26, que tenía
+    # 16 feriados de 2025 sin cargar dentro de su ventana.
+    #
+    # El prospecto promedia las TNA PUBLICADAS, así que un día sin publicación no
+    # va ni en el numerador ni en el denominador.
     obs = [serie[d] for d in ventana if d in serie and d <= ctx.hoy]
-    n_tot, n_obs = len(ventana), len(obs)
-    n_proy = n_tot - n_obs
+    fut = [d for d in ventana if d > ctx.hoy]
+    n_obs, n_proy = len(obs), len(fut)
+    n_tot = n_obs + n_proy
+    n_sin_dato = len(ventana) - n_tot
 
     if driver is not None:
         tna_fut, origen = float(driver), "driver"
@@ -425,6 +435,9 @@ def motor_tamar(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
             "n_obs":       n_obs,
             "n_proy":      n_proy,
             "pct_obs":     round(n_obs / n_tot, 6),
+            # Días hábiles de la ventana sin publicación. >0 esperable por
+            # feriados; si crece de golpe, mirar el sync de la serie.
+            "n_sin_dato":  n_sin_dato,
             "ventana":     [str(ventana[0]), str(ventana[-1])],
             "origen_proy": origen,
         },
@@ -623,7 +636,10 @@ MOTORES: dict[str, Callable[..., Pata]] = {
 
 # Rango de bisección del driver de cada pata, en sus propias unidades.
 DRIVER_BOUNDS: dict[str, tuple] = {
-    "TAMAR": (-0.99, 20.0),     # TNA decimal
+    # TNA de depósitos: no puede ser negativa. Con el piso en -0.99 la bisección
+    # devolvía breakevens imposibles (-85,7% para TTS26) en vez de decir que la
+    # opción ya está definida y no hay TAMAR futura que la dé vuelta.
+    "TAMAR": (0.0, 3.0),        # TNA decimal
     "CER":   (-0.50, 5.0),      # inflación mensual decimal
     "DLK":   (1.0, 1_000_000),  # A3500 al vencimiento
 }
