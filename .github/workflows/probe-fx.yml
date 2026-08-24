@@ -1,0 +1,42 @@
+# Sonda: ¿se puede llegar a MAE desde un runner de GitHub?
+#
+# api.mae.com.ar (el endpoint con API key) contesta 403 desde datacenter: es el
+# WAF de Imperva, que responde ANTES de que MAE mire la credencial. Verificado
+# el 2026-08-24 con runners de GitHub y con una Edge Function de Supabase.
+#
+# api.marketdata.mae.com.ar es el backend del sitio público, sin key, y sale por
+# el mismo edge de Imperva (misma IP, 45.60.69.2) pero con otra configuración de
+# sitio. Si contesta 200 desde acá, el FX se resuelve en la nube y el relay que
+# corre en la Mac deja de hacer falta.
+#
+# No escribe nada: sólo mira y reporta.
+name: Sonda FX MAE
+on:
+  workflow_dispatch:
+
+jobs:
+  sonda:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: IP de salida del runner
+        run: curl -s --max-time 10 https://api.ipify.org || true
+
+      - name: Sitio público (sin key)
+        run: |
+          # -g: sin esto curl trata las llaves del JSON como globbing y manda una
+          # request por cada coma.
+          HOY=$(date -u +%F)
+          U="https://api.marketdata.mae.com.ar/api/mercado/titulo/detalle?oTitulo={%22codTitulo%22:%22UST\$T%22,%22tipoEmision%22:%22FOR%22,%22plazo%22:%22000%22,%22segmento%22:%22M%22,%22moneda%22:%22T%22,%22tipoFecha%22:%22D%22,%22fecha%22:%22$HOY%22,%22fechaHasta%22:%22$HOY%22}"
+          echo "--- marketdata (sin key) ---"
+          curl -s -g --max-time 20 -w "\n[HTTP %{http_code}]\n" "$U" | head -c 600
+
+      - name: Endpoint con API key, para comparar
+        env:
+          MAE_API_KEY: ${{ secrets.MAE_API_KEY }}
+        run: |
+          echo "--- api.mae.com.ar (con key) ---"
+          curl -s --max-time 20 -w "\n[HTTP %{http_code}]\n" \
+            -H "x-api-key: $MAE_API_KEY" \
+            -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36" \
+            "https://api.mae.com.ar/MarketData/v1/mercado/cotizaciones/forex?ticker=UST%24T" | head -c 400
