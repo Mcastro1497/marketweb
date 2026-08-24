@@ -52,6 +52,7 @@ except ImportError:
     ZoneInfo = None
 
 from . import series
+from .db import cliente
 
 
 def _tz_ar():
@@ -72,7 +73,7 @@ TIMEOUT = 10
 
 class Spot(NamedTuple):
     valor: float
-    fuente: str                    # 'MAE' | 'dolarapi' | 'A3500'
+    fuente: str                    # 'MAE relay' | 'dolarapi' | 'A3500'
     momento: Optional[datetime]    # cuándo se actualizó el dato en el origen
     fecha: Optional[date]          # sólo para A3500, que es un cierre diario
 
@@ -106,6 +107,51 @@ def desde_dolarapi() -> Optional[Spot]:
         return None
 
 
+# Fila donde el relay deja el último MAE. No es un instrumento: usa `prices`
+# igual que UST, para no sumar una tabla por un solo valor.
+RELAY_SYMBOL = "UST_MAE"
+RELAY_MAX_MIN = 10
+
+
+def desde_relay() -> Optional[Spot]:
+    """MAE, publicado por fx_relay.py desde una máquina con IP residencial.
+
+    Akamai bloquea a MAE desde datacenter: lo probamos con los runners de GitHub
+    y con una Edge Function de Supabase, 403 en los dos, y el 403 llega ANTES de
+    que MAE mire la key. Así que la consulta la hace una máquina de afuera y deja
+    el valor acá; la nube sólo lo lee.
+
+    El corte por antigüedad no es cosmético: si el relay se cae o la máquina se
+    suspende, el valor se congela. Sin este chequeo la nube seguiría valuando con
+    un dólar viejo creyendo que es de MAE, que es peor que usar dolarapi.
+    """
+    try:
+        fila = (cliente().table("prices").select("last, ts")
+                .eq("symbol", RELAY_SYMBOL).limit(1).execute().data or [None])[0]
+    except Exception as e:
+        print(f"[FX] relay: no se pudo leer ({str(e)[:60]})")
+        return None
+    if not fila or fila.get("last") is None or not fila.get("ts"):
+        return None
+    momento = datetime.fromisoformat(fila["ts"])
+    edad = (datetime.now(timezone.utc) - momento).total_seconds() / 60
+
+    # La frescura se mide contra el último instante en que el mayorista estuvo
+    # vivo, no contra el reloj. Después del cierre el último valor ES el cierre y
+    # sigue siendo bueno; pero tiene que haberse capturado CERCA del cierre, no a
+    # las 9 de la mañana. Medir por hora del día no alcanza: a las 15:01 dejaba
+    # pasar cualquier cosa del día, incluido un relay que se murió temprano.
+    ahora_ar = datetime.now(_tz_ar())
+    cierre_ar = ahora_ar.replace(hour=CIERRE_MAYORISTA_H, minute=0, second=0, microsecond=0)
+    referencia = min(ahora_ar, cierre_ar)
+    atraso = (referencia - momento.astimezone(_tz_ar())).total_seconds() / 60
+    if atraso > RELAY_MAX_MIN:
+        print(f"[FX] relay viejo: {edad:.0f} min, {atraso:.0f} min antes de la última "
+              f"cotización viva. Se ignora y se sigue la cadena.")
+        return None
+    return Spot(float(fila["last"]), "MAE relay", momento, None)
+
+
 def desde_a3500() -> Optional[Spot]:
     """Último A3500 publicado por el BCRA, de la tabla series."""
     f, v = series.ultimo(series.a3500())
@@ -125,6 +171,13 @@ ANTIGUEDAD_ALERTA_MIN = 45
 def spot(mae_fn=None) -> Optional[Spot]:
     """Cadena completa. `mae_fn` consulta MAE; se pasa desde afuera para no
     duplicar acá las credenciales y el endpoint que ya tiene dlk.py."""
+    # El relay va primero: es MAE de verdad, en tiempo real, y ya viene con su
+    # propio corte por antigüedad. Si no hay o está viejo, sigue la cadena vieja.
+    r = desde_relay()
+    if r:
+        print(f"[FX] MAE via relay = {r.valor:,.4f}, hace {r.antiguedad_min:.0f} min")
+        return r
+
     s = desde_dolarapi()
 
     # MAE, cuando está disponible, se usa de CONTROL: si difiere del mayorista
