@@ -77,6 +77,9 @@ class Spot(NamedTuple):
     fuente: str                    # 'MAE relay' | 'dolarapi' | 'A3500'
     momento: Optional[datetime]    # cuándo se actualizó el dato en el origen
     fecha: Optional[date]          # sólo para A3500, que es un cierre diario
+    # Resto de la rueda cuando la fuente lo trae: apertura, máximo, mínimo,
+    # cierre anterior, variación y monto. Ya viene en las unidades de `prices`.
+    detalle: Optional[dict] = None
 
     @property
     def antiguedad_min(self) -> Optional[float]:
@@ -148,14 +151,36 @@ def desde_marketdata() -> Optional[Spot]:
         print(f"[FX] MAE público trae la rueda del {fecha_reg}, no la de hoy. Se ignora.")
         return None
 
-    for campo in ("ultimoHoy", "cierreHoy"):
-        v = d.get(campo)
+    def _num(x):
         try:
-            v = float(v)
+            x = float(x)
         except (TypeError, ValueError):
-            continue
-        if v > 0:
-            return Spot(v, f"MAE público ({campo})", datetime.now(timezone.utc), None)
+            return None
+        return x if x > 0 else None
+
+    # variacionPerc viene en PORCENTAJE (0.7338 = +0,73%) y change_pct se guarda
+    # como FRACCIÓN en toda la tabla. Sin el /100 quedaría 100 veces más grande.
+    var = d.get("variacionPerc")
+    try:
+        var = float(var) / 100.0
+    except (TypeError, ValueError):
+        var = None
+
+    detalle = {
+        "apertura":      _num(d.get("aperturaHoy")),
+        "maximo":        _num(d.get("maximo")),
+        "minimo":        _num(d.get("minimo")),
+        "closing_price": _num(d.get("cierreAyer")),
+        "monto_operado": _num(d.get("montoNegociadoHoy")),
+        "change_pct":    var,
+    }
+    detalle = {k: v for k, v in detalle.items() if v is not None}
+
+    for campo in ("ultimoHoy", "cierreHoy"):
+        v = _num(d.get(campo))
+        if v:
+            return Spot(v, f"MAE público ({campo})", datetime.now(timezone.utc),
+                        None, detalle)
     return None
 
 

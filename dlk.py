@@ -90,12 +90,19 @@ def fetch_fx_mae() -> Optional[float]:
         print(f"[WARN] MAE excepción: {e}")
         return None
 
-def upsert_fx(price: float):
-    sb.table("prices").upsert({
+def upsert_fx(price: float, detalle: Optional[dict] = None):
+    """Guarda el mayorista y, si la fuente lo trae, el resto de la rueda.
+
+    `detalle` ya viene en las unidades de `prices` (change_pct como fracción).
+    Ver sql/017_fx_mae_detalle.sql.
+    """
+    fila = {
         "symbol": FX_SYMBOL,
         "last":   price,
-        "ts":     datetime.now(timezone.utc).isoformat()
-    }).execute()
+        "ts":     datetime.now(timezone.utc).isoformat(),
+    }
+    fila.update(detalle or {})
+    sb.table("prices").upsert(fila).execute()
 
 def get_last_fx() -> Optional[float]:
     """Trae el último FX guardado en prices (fallback si MAE no responde)."""
@@ -117,7 +124,7 @@ def get_fx_oficial() -> Optional[float]:
     if s is None:
         print("[ERROR] No hay FX por ninguna fuente. Skip ciclo.")
         return None
-    upsert_fx(s.valor)
+    upsert_fx(s.valor, s.detalle)
     edad = s.antiguedad_min
     detalle = f"{s.fuente}" + (f", hace {edad:.0f} min" if edad is not None else "")
     print(f"[OK] FX = {s.valor:,.4f} — {detalle}  (guardado en prices.{FX_SYMBOL})")
