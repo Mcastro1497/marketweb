@@ -42,6 +42,7 @@ pueda decidir y para que quede asentado.
 """
 import json
 import os
+import urllib.parse
 import urllib.request
 from datetime import date, datetime, timezone
 from typing import NamedTuple, Optional
@@ -105,6 +106,57 @@ def desde_dolarapi() -> Optional[Spot]:
     except Exception as e:
         print(f"[FX] dolarapi falló: {str(e)[:80]}")
         return None
+
+
+# Backend del sitio público de MAE. Sin key y alcanzable desde la nube: sale por
+# el mismo edge de Imperva que api.mae.com.ar (misma IP, 45.60.69.2) pero con
+# otra configuración de sitio. Medido el 2026-08-24 desde un runner de GitHub
+# (20.169.53.118): este contesta 200 y el de la key, 403, en la misma corrida.
+MD_URL = "https://api.marketdata.mae.com.ar/api/mercado/titulo/detalle"
+
+
+def desde_marketdata() -> Optional[Spot]:
+    """Mayorista de MAE (UST$T) por el sitio público. Es la fuente autoritativa.
+
+    Devuelve el último operado del día. `cierreHoy` viene en 0 durante la rueda y
+    se completa al cierre, así que se usa ultimoHoy y se cae a cierreHoy.
+
+    Se valida que la fecha del registro sea la pedida: un fin de semana o feriado
+    la API contesta igual, y sin este chequeo se tomaría el dato de otro día como
+    si fuera de hoy.
+    """
+    hoy = datetime.now(_tz_ar()).date()
+    f = hoy.isoformat()
+    o = ('{"codTitulo":"UST$T","tipoEmision":"FOR","plazo":"000","segmento":"M",'
+         f'"moneda":"T","tipoFecha":"D","fecha":"{f}","fechaHasta":"{f}"}}')
+    url = f"{MD_URL}?oTitulo=" + urllib.parse.quote(o, safe="{}:,$")
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "marketweb/1.0", "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            d = json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        print(f"[FX] MAE público falló: {str(e)[:80]}")
+        return None
+    if isinstance(d, list):
+        d = d[0] if d else {}
+    if not isinstance(d, dict):
+        return None
+
+    fecha_reg = str(d.get("fecha") or "")
+    if fecha_reg and fecha_reg != hoy.strftime("%Y%m%d"):
+        print(f"[FX] MAE público trae la rueda del {fecha_reg}, no la de hoy. Se ignora.")
+        return None
+
+    for campo in ("ultimoHoy", "cierreHoy"):
+        v = d.get(campo)
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            return Spot(v, f"MAE público ({campo})", datetime.now(timezone.utc), None)
+    return None
 
 
 # Fila donde el relay deja el último MAE. No es un instrumento: usa `prices`
@@ -171,8 +223,14 @@ ANTIGUEDAD_ALERTA_MIN = 45
 def spot(mae_fn=None) -> Optional[Spot]:
     """Cadena completa. `mae_fn` consulta MAE; se pasa desde afuera para no
     duplicar acá las credenciales y el endpoint que ya tiene dlk.py."""
-    # El relay va primero: es MAE de verdad, en tiempo real, y ya viene con su
-    # propio corte por antigüedad. Si no hay o está viejo, sigue la cadena vieja.
+    # MAE por el sitio público va primero: es la fuente autoritativa, en tiempo
+    # real, sin key y accesible desde la nube. El relay queda de respaldo por si
+    # ese host también se cierra algún día.
+    m = desde_marketdata()
+    if m:
+        print(f"[FX] {m.fuente} = {m.valor:,.4f}")
+        return m
+
     r = desde_relay()
     if r:
         print(f"[FX] MAE via relay = {r.valor:,.4f}, hace {r.antiguedad_min:.0f} min")
