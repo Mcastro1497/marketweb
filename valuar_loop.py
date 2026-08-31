@@ -53,7 +53,7 @@ import time
 from datetime import date, datetime, timezone
 
 import patas as P
-from lib.tasas import tir_y_duracion
+from lib.tasas import tir_y_duracion, tna_cupon_cero
 
 # cerv2 lee sys.argv al importarse (APPLY y SYM_ARG son módulo-level), así que se
 # lo blanquea durante el import: si no, tomaría los argumentos de este script.
@@ -347,16 +347,34 @@ def ciclo_flujos(ref: "ReferenciaFlujos", previos: dict, args) -> tuple:
         nuevos[sym] = px
         if ytm is None:
             continue
-        salida.append({
+        fila = {
             "symbol": sym, "ytm": round(ytm, 6),
             "ytm_tipo": ref.conv[sym],
             "duration_y": round(dur, 6) if dur else None,
             "ts": ts,
-        })
+        }
+        # La TNA se recalcula acá, con el mismo precio que la ytm de esta vuelta.
+        # Antes sólo la escribía cerv2, una vez por corrida: como este bucle pisa
+        # la ytm cada vez que se mueve el precio, la fila quedaba con la ytm del
+        # precio de ahora y la tna del precio de la última corrida de cerv2. Sólo
+        # aplica a la letra cupón cero en pesos; en lo demás queda en None y no
+        # se manda, para no pisar con null lo que otro motor sí sabe calcular.
+        if ref.conv[sym] == "nominal_ars":
+            tna = tna_cupon_cero(ref.val_dt, px, fl)
+            if tna is not None:
+                fila["tna"] = round(tna, 8)
+        salida.append(fila)
 
     if salida and not args.dry_run:
-        for i in range(0, len(salida), 500):
-            P.sb.table("prices").upsert(salida[i:i + 500]).execute()
+        # Mismo cuidado que en ciclo_patas: ahora que la letra cupón cero viaja
+        # con "tna" y el resto no, un lote mezclado escribiría NULL sobre la tna
+        # de las filas que no la traen. Se parte por juego de claves.
+        grupos: dict = {}
+        for fila in salida:
+            grupos.setdefault(frozenset(fila), []).append(fila)
+        for filas_g in grupos.values():
+            for i in range(0, len(filas_g), 500):
+                P.sb.table("prices").upsert(filas_g[i:i + 500]).execute()
 
     return nuevos, len(salida), time.monotonic() - t0
 

@@ -147,3 +147,30 @@ def tir_y_duracion(fecha_val, precio: float, flujos):
         return None, None
     pos = [(_yf(fecha_val, d), float(m)) for d, m in flujos if float(m) != 0]
     return r, macaulay(pos, r)
+
+
+def tna_cupon_cero(fecha_val, precio: float, flujos):
+    """TNA simple act/365 de una letra cupón cero. None si no aplica.
+
+    Sólo tiene sentido cuando queda UN único pago: la TNA es el rendimiento
+    directo del período anualizado en forma lineal, que es como se cotiza una
+    LECAP en el mercado local. Un bono con cupones no tiene "una" TNA, y por eso
+    devuelve None en vez de inventar un número.
+
+    fecha_val: datetime de liquidación (T+1), el mismo que recibe tir_y_duracion.
+    precio:    ya AJUSTADO por quien llama, igual criterio que tir_y_duracion.
+    flujos:    [(datetime, monto)] futuros, sin el precio.
+
+    Vivía suelta dentro del bucle de cerv2.py. Se sube acá porque valuar_loop.py
+    revalúa el precio cada pocos segundos y sólo reescribía ytm y duration_y: la
+    tna quedaba clavada en el precio del último cerv2 y la fila terminaba con dos
+    métricas de precios distintos. Un solo dueño para las tres.
+    """
+    pos = [(d, float(m)) for d, m in flujos if float(m) != 0]
+    if len(pos) != 1:
+        return None
+    d, monto = pos[0]
+    t = _yf(fecha_val, d)
+    if not (monto > 0 and precio > 0 and t > 0):
+        return None
+    return ((monto / precio) - 1.0) / t

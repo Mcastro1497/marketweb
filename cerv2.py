@@ -28,6 +28,7 @@ from datetime import datetime, timezone, time as dtime, date as dtdate
 from typing import Optional, Set
 
 import pandas as pd
+from lib.tasas import tna_cupon_cero
 from supabase import create_client
 from dotenv import load_dotenv
 load_dotenv()
@@ -280,13 +281,13 @@ def valuar_prices() -> int:
                    for _, r2 in g.iterrows() if float(r2["total"]) != 0]
         dur = macaulay(cfs_pos, ytm_val)
 
+        # La TNA sale de lib.tasas, el mismo helper que usa valuar_loop en la
+        # revaluación continua: si cada uno la calculara por su lado, la fila
+        # terminaría con ytm de un precio y tna de otro.
         tna_val = None
         if tipo == "FIJA":
-            pos = g[g["total"].astype(float) != 0]
-            if len(pos) == 1:
-                pf = float(pos.iloc[0]["total"]); dt = pos.iloc[0]["fecha_pago"].to_pydatetime()
-                t = _yf(val_utc, dt)
-                if pf > 0 and price > 0 and t > 0: tna_val = ((pf/price) - 1.0) / t
+            fl = [(r2["fecha_pago"].to_pydatetime(), float(r2["total"])) for _, r2 in g.iterrows()]
+            tna_val = tna_cupon_cero(val_utc, price, fl)
 
         upsert_metrics(sym, float(ytm_val), float(dur) if dur else None, tna_val,
                        cer_fixed=fixed, tipo=tipo)
