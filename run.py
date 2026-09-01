@@ -64,6 +64,13 @@ PY = str(_VENV) if _VENV.exists() else sys.executable
 #   "rueda"   Depende del precio, así que cambia todo el tiempo. Es lo único que
 #             tiene sentido recalcular seguido.
 PASOS = [
+    # Va primero y no al final: si un instrumento venció, no tiene sentido que
+    # cerv2/dlk/tir gasten una valuación en él ni que la web lo siga listando.
+    # Antes esto era deprecated/cleanflows.py, manual y "cada tanto", así que en
+    # los hechos no corría: se juntaron instrumentos vencidos hacía diez días.
+    # BORRA, no desactiva, y por eso deja backup de lo que saca.
+    ("limpieza", [PY, "cleanflows.py", "--backup-dir", "backups"],
+     "Borra instrumentos y flujos ya vencidos (deja backup en backups/)", False, "diario"),
     ("series", [PY, "series_sync.py"],
      "Series del BCRA (cer, tamar_tna, a3500, ipc_mensual)", False, "diario"),
     ("rem",    [PY, "rem_sync.py"],

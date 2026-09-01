@@ -41,3 +41,15 @@ jobs:
         run: |
           # En Actions no hay .venv: se usa el python del runner.
           python run.py --verbose
+
+      # El paso de limpieza BORRA instrumentos y flujos vencidos, y deja copia en
+      # backups/. El runner se destruye al terminar, así que sin esto la copia no
+      # serviría de nada: es la única forma de recuperar lo borrado.
+      - name: Guardar el backup de la limpieza
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-limpieza-${{ github.run_id }}
+          path: backups/
+          if-no-files-found: ignore
+          retention-days: 90

@@ -21,3 +21,6 @@ logs/
 
 # ── Sistema ─────────────────────────────────────────────────────────────────
 .DS_Store
+
+# Backups de cleanflows.py: datos, no código. No van al repo.
+backups/
