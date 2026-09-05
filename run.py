@@ -75,6 +75,12 @@ PASOS = [
      "Series del BCRA (cer, tamar_tna, a3500, ipc_mensual)", False, "diario"),
     ("rem",    [PY, "rem_sync.py"],
      "REM del BCRA. Es mensual: casi siempre no hay nada nuevo", True, "diario"),
+    # Va después de series y antes de cerv2: necesita la serie CER fresca y su
+    # salida es justo lo que cerv2 exige para reconocer un bono como CER. Un
+    # instrumento nuevo entra por el panel sin cer_emision, y sin este paso
+    # cerv2.es_cer() lo descarta y lo valúa como si fuera a tasa fija, callado.
+    ("cer_emision", [PY, "cer_emision_sync.py"],
+     "Completa cer_emision de los CER nuevos (CER de emisión − 10 hábiles)", True, "diario"),
     ("cerv2",  [PY, "cerv2.py", "--once"],
      "Proyección CER de los flujos + valuación de soberanos ARS", False, "rueda"),
     ("dlk",    [PY, "dlk.py", "--once"],
