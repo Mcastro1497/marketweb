@@ -9,12 +9,19 @@ Escribe en la tabla `acciones_cedears`:
     var_diaria = last/closing_price - 1, ts
 
 Uso:
-    .venv/bin/python acciones.py     # daemon: stream-ea precios + variación diaria
+    .venv/bin/python acciones.py                 # corre hasta que lo cortes
+    .venv/bin/python acciones.py --hasta 17:15   # se apaga solo al cierre
 
 Clasificación (ISO 10962 / cficode): ESXXXX = acción, EMXXXX = CEDEAR.
 """
+import argparse
 import os, time, threading, signal, requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as dtime
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -133,7 +140,33 @@ def pusher_loop(tipo_map):
         _stop.wait(1.0)
 
 
+def _tz():
+    """Zona horaria local, de LOCAL_TZ en el .env. Misma convención que precios2.py."""
+    nombre = os.getenv("LOCAL_TZ", "America/Argentina/Cordoba")
+    if ZoneInfo:
+        try:
+            return ZoneInfo(nombre)
+        except Exception:
+            pass
+    return timezone.utc
+
+
+def _parse_hora(txt):
+    """'17:15' -> time(17, 15). La hora es LOCAL (LOCAL_TZ del .env)."""
+    h, m = txt.split(":")
+    return dtime(int(h), int(m))
+
+
 def main():
+    ap = argparse.ArgumentParser(description="Precios de acciones y CEDEARs desde ECO")
+    ap.add_argument("--hasta", metavar="HH:MM",
+                    help="apagarse solo a esta hora local. Convierte el proceso en un "
+                         "job programable en vez de un daemon que hay que acordarse "
+                         "de levantar: sin esto estuvo veinte días caído sin que "
+                         "nada avisara.")
+    args = ap.parse_args()
+    limite = _parse_hora(args.hasta) if args.hasta else None
+
     init_eco()
     uni = universo()
     tipo_map = {tk: tipo for _, tk, tipo in uni}
@@ -144,8 +177,13 @@ def main():
     def stop(sig, frame):
         print("\nDeteniendo..."); running["v"] = False; _stop.set()
     signal.signal(signal.SIGINT, stop)
+    if limite:
+        print(f"[WS] Se apaga solo a las {limite.strftime('%H:%M')} ({os.getenv('LOCAL_TZ', 'UTC')})")
     try:
         while running["v"]:
+            if limite and datetime.now(_tz()).time() >= limite:
+                print(f"\n[WS] Hora de cierre ({limite.strftime('%H:%M')}), terminando.")
+                break
             time.sleep(0.5)
     finally:
         _stop.set(); t.join(timeout=2.0)
