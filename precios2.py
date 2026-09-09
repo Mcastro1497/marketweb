@@ -104,18 +104,21 @@ def pick_symbol(by_ticker, tk, seg):
 
 # ── Upsert ────────────────────────────────────────────────
 def upsert_price(symbol, last, bid, ask, price_ars, fx_mep, closing_price, change_pct, price_ars_usd):
-    sb.table(PRICES_TABLE).upsert({
-        "symbol":        symbol,
-        "last":          last,
-        "bid":           bid,
-        "ask":           ask,
-        "price_ars":     price_ars,
-        "fx_mep":        fx_mep,
-        "closing_price": closing_price,
-        "change_pct":    change_pct,
-        "price_ars_usd": price_ars_usd,
-        "ts":            datetime.now(timezone.utc).isoformat()
-    }).execute()
+    """Escribe SOLO los campos que llegaron con valor.
+
+    Un upsert de PostgREST actualiza únicamente las columnas presentes en el
+    cuerpo, así que omitir las vacías deja las anteriores en pie. Antes se
+    mandaban las nueve siempre, y un tick parcial —muy común: llega LAST sin
+    CLOSING_PRICE— borraba el resto de la fila.
+    """
+    fila = {"symbol": symbol, "ts": datetime.now(timezone.utc).isoformat()}
+    for col, val in (("last", last), ("bid", bid), ("ask", ask),
+                     ("price_ars", price_ars), ("fx_mep", fx_mep),
+                     ("closing_price", closing_price), ("change_pct", change_pct),
+                     ("price_ars_usd", price_ars_usd)):
+        if val is not None:
+            fila[col] = val
+    sb.table(PRICES_TABLE).upsert(fila).execute()
 
 # ── Estado compartido ─────────────────────────────────────
 _lock   = threading.Lock()
@@ -175,6 +178,12 @@ def pusher_loop():
             d_pesos = snapshot.get(sym_pesos)
             d_usd   = snapshot.get(tk_usd) if tk_usd else None
             if not d_pesos:
+                continue
+            # Antes de la apertura el websocket manda el mensaje igual, pero con
+            # todas las entradas vacías: la clave existe con los campos en None.
+            # Sin este corte se pisaba el cierre del día anterior con NULL, y con
+            # el arranque temprano eso pasaba todas las mañanas.
+            if d_pesos.get("last") is None and not (d_usd and d_usd.get("last") is not None):
                 continue
             if (now - _pushed.get(sym_pesos, 0)) < PUSH_INTERVAL_SEC:
                 continue
