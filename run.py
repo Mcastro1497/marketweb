@@ -95,6 +95,12 @@ PASOS = [
     # el bucle no corrió.
     ("patas",  [PY, "patas.py"],
      "Patas y duales: valuations + prices.ytm_ars. SIEMPRE AL FINAL", False, "diario"),
+    # Después de todo, para que audite el estado final y quede al pie del log.
+    # Va acá y no antes porque cer_emision completa datos durante la corrida y
+    # auditarlo primero reportaría huecos que la propia corrida ya cerró.
+    # Sólo informa: un ISIN faltante no es motivo para tumbar el pipeline.
+    ("auditoria", [PY, "auditar.py"],
+     "Revisa que los instrumentos activos tengan los datos que su tipo necesita", True, "diario"),
 ]
 
 
