@@ -39,8 +39,10 @@ concurrency:
 jobs:
   acciones:
     runs-on: ubuntu-latest
-    # Red de seguridad por si --hasta fallara. Mayor que la ventana real y por
-    # debajo del tope de 6 horas de GitHub.
+    # Red de seguridad por si --hasta fallara, apenas por debajo del tope duro de
+    # 6 horas de GitHub. Si el job llegara a arrancar puntual a las 09:47 no
+    # alcanzaría las 17:15 ni con el tope entero: ahí lo cubre la corrida que el
+    # concurrency group deja en espera, que arranca cuando ésta termina.
     timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
