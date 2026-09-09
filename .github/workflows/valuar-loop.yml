@@ -1,4 +1,4 @@
-# valuar_loop.py durante la rueda, tarde.
+# Valuar loop durante toda la rueda, en un solo job.
 #
 # Revalúa TODO el universo cada pocos segundos: patas y duales por fórmula
 # cerrada, y ONs, hard dollar, dólar linked y soberanos ARS por XIRR sobre flujos.
@@ -12,22 +12,37 @@
 # Arranca 13:00 y el de la mañana corta 13:30: media hora de solape para
 # absorber la demora del cron. Los dos escriben el mismo valor calculado
 # sobre el mismo precio, así que solaparse es inocuo.
-name: Valuar loop tarde
+name: Valuar loop
 
 on:
   schedule:
-    # Cron en UTC, sin ajuste por horario de verano. 16:00 UTC = 13:00 ART.
-    - cron: "0 16 * * 1-5"
+    # GitHub larga los cron programados de este repo entre 2 y 5 horas tarde, de
+    # forma consistente y variable (medido sobre precios, valuar_loop y pipeline).
+    # No es la expresión: le pasa a todos. Por eso no hay UNA hora de arranque
+    # sino seis, de 09:47 a 14:47 local: alcanza con que GitHub largue cualquiera
+    # de ellas dentro de la rueda. El minuto 47 y no el 0 porque el tope de hora
+    # es la franja más disputada del scheduler.
+    #
+    # El concurrency group hace el resto: corre una sola, las demás se cancelan.
+    # Y como todas cierran 17:15, la que gane cubre hasta el final de la rueda
+    # en vez de morirse por haber nacido pasada su propia hora de corte, que es
+    # lo que le venía pasando a los jobs de la mañana desde el 2 de septiembre.
+    - cron: "47 12 * * 1-5"
+    - cron: "47 13 * * 1-5"
+    - cron: "47 14 * * 1-5"
+    - cron: "47 15 * * 1-5"
+    - cron: "47 16 * * 1-5"
+    - cron: "47 17 * * 1-5"
   workflow_dispatch:
 
 concurrency:
-  group: valuar-loop-tarde
+  group: valuar-loop
   cancel-in-progress: false
 
 jobs:
   loop:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

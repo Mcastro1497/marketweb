@@ -1,4 +1,4 @@
-# acciones.py durante la rueda, mañana.
+# Acciones y CEDEARs durante toda la rueda, en un solo job.
 #
 # Mismo patrón que los workflows de precios2: el proceso suscribe al websocket de
 # ECO una sola vez y después sólo espera los ticks. Con --hasta se apaga solo.
@@ -9,19 +9,31 @@
 # actualizarse y nada lo había avisado. Los precios de las 69 acciones y los 400
 # CEDEARs del dashboard salen de acá.
 #
-# Va partido en dos jobs porque GitHub corta cualquier job a las 6 horas y la
-# rueda dura más. Arranca 10:00 local y empalma con el de la tarde.
-name: Acciones y CEDEARs mañana
+name: Acciones y CEDEARs
 
 on:
   schedule:
-    # Los cron de GitHub son en UTC y NO ajustan por horario de verano.
-    # Mismo horario que los de precios2, que cubren la misma rueda.
-    - cron: "0 13 * * 1-5"
+    # GitHub larga los cron programados de este repo entre 2 y 5 horas tarde, de
+    # forma consistente y variable (medido sobre precios, valuar_loop y pipeline).
+    # No es la expresión: le pasa a todos. Por eso no hay UNA hora de arranque
+    # sino seis, de 09:47 a 14:47 local: alcanza con que GitHub largue cualquiera
+    # de ellas dentro de la rueda. El minuto 47 y no el 0 porque el tope de hora
+    # es la franja más disputada del scheduler.
+    #
+    # El concurrency group hace el resto: corre una sola, las demás se cancelan.
+    # Y como todas cierran 17:15, la que gane cubre hasta el final de la rueda
+    # en vez de morirse por haber nacido pasada su propia hora de corte, que es
+    # lo que le venía pasando a los jobs de la mañana desde el 2 de septiembre.
+    - cron: "47 12 * * 1-5"
+    - cron: "47 13 * * 1-5"
+    - cron: "47 14 * * 1-5"
+    - cron: "47 15 * * 1-5"
+    - cron: "47 16 * * 1-5"
+    - cron: "47 17 * * 1-5"
   workflow_dispatch:
 
 concurrency:
-  group: acciones-manana
+  group: acciones
   cancel-in-progress: false
 
 jobs:
@@ -29,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     # Red de seguridad por si --hasta fallara. Mayor que la ventana real y por
     # debajo del tope de 6 horas de GitHub.
-    timeout-minutes: 240
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
@@ -40,7 +52,7 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - name: Recibir precios hasta las 13:30
+      - name: Recibir precios hasta las 17:15
         env:
           SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
           SERVICE_KEY:       ${{ secrets.SERVICE_KEY }}
@@ -51,4 +63,4 @@ jobs:
           ECO_WS:            ${{ secrets.ECO_WS }}
           PUSH_INTERVAL_SEC: ${{ secrets.PUSH_INTERVAL_SEC }}
           LOCAL_TZ:          ${{ secrets.LOCAL_TZ }}
-        run: python acciones.py --hasta 13:30
+        run: python acciones.py --hasta 17:15

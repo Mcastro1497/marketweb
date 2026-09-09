@@ -1,0 +1,64 @@
+# Precios durante toda la rueda, en un solo job.
+#
+# El proceso suscribe al websocket de ECO una sola vez y después sólo espera:
+# el handler recibe los ticks y los empuja a `prices`. Con --hasta se apaga solo,
+# así que no queda como daemon.
+#
+name: Precios
+
+on:
+  schedule:
+    # GitHub larga los cron programados de este repo entre 2 y 5 horas tarde, de
+    # forma consistente y variable (medido sobre precios, valuar_loop y pipeline).
+    # No es la expresión: le pasa a todos. Por eso no hay UNA hora de arranque
+    # sino seis, de 09:47 a 14:47 local: alcanza con que GitHub largue cualquiera
+    # de ellas dentro de la rueda. El minuto 47 y no el 0 porque el tope de hora
+    # es la franja más disputada del scheduler.
+    #
+    # El concurrency group hace el resto: corre una sola, las demás se cancelan.
+    # Y como todas cierran 17:15, la que gane cubre hasta el final de la rueda
+    # en vez de morirse por haber nacido pasada su propia hora de corte, que es
+    # lo que le venía pasando a los jobs de la mañana desde el 2 de septiembre.
+    - cron: "47 12 * * 1-5"
+    - cron: "47 13 * * 1-5"
+    - cron: "47 14 * * 1-5"
+    - cron: "47 15 * * 1-5"
+    - cron: "47 16 * * 1-5"
+    - cron: "47 17 * * 1-5"
+  workflow_dispatch:
+
+concurrency:
+  group: precios
+  cancel-in-progress: false
+
+jobs:
+  precios:
+    runs-on: ubuntu-latest
+    # Red de seguridad por si --hasta fallara, apenas por debajo del tope duro de
+    # 6 horas de GitHub. Si el job llegara a arrancar puntual a las 09:47 no
+    # alcanzaría las 17:15 ni con el tope entero: ahí lo cubre la corrida que el
+    # concurrency group deja en espera, que arranca cuando ésta termina.
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Recibir precios hasta las 17:15
+        env:
+          SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
+          SERVICE_KEY:       ${{ secrets.SERVICE_KEY }}
+          ECO_USER:          ${{ secrets.ECO_USER }}
+          ECO_PASS:          ${{ secrets.ECO_PASS }}
+          ECO_ACCT:          ${{ secrets.ECO_ACCT }}
+          ECO_BASE:          ${{ secrets.ECO_BASE }}
+          ECO_WS:            ${{ secrets.ECO_WS }}
+          DEFAULT_SEGMENT:   ${{ secrets.DEFAULT_SEGMENT }}
+          PUSH_INTERVAL_SEC: ${{ secrets.PUSH_INTERVAL_SEC }}
+          LOCAL_TZ:          ${{ secrets.LOCAL_TZ }}
+        run: python precios2.py --hasta 17:15
