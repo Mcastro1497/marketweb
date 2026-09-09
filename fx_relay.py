@@ -7,8 +7,9 @@ los runners de GitHub y con una Edge Function de Supabase. Por eso la consulta
 la hace esta máquina y el valor se deja en `prices` (symbol UST_MAE), donde
 lib/fx.py lo lee como primera fuente de la cadena.
 
-Además historiza cada lectura en `fx_mae_rueda`. En `prices` se hace upsert, así
-que el recorrido intradiario se pisa a sí mismo y se pierde; ahí queda guardado.
+El recorrido intradiario NO se guarda: MAE lo sirve entero por
+/api/mercado/datosgrafico, con una entrada por operación y para cualquier fecha
+pasada. Lo consume el dashboard directo.
 
 Corre una vez y sale: la repetición la maneja launchd. Fuera del horario del
 mayorista no hace nada, para no gastar llamadas ni escribir ruido.
@@ -58,26 +59,6 @@ def main() -> int:
     fila = {"symbol": SYMBOL, "last": float(valor), "ts": ahora}
     fila.update(detalle)
     dlk.sb.table("prices").upsert(fila).execute()
-
-    # Y una fila por lectura, que es lo único que deja rastro: el upsert de
-    # arriba pisa la anterior y del recorrido de la rueda no queda nada.
-    # monto_operado se guarda ACUMULADO, como lo publica MAE; el volumen de cada
-    # intervalo es su diferencia contra la lectura previa.
-    if detalle:
-        try:
-            dlk.sb.table("fx_mae_rueda").insert({
-                "ts":              ahora,
-                "last":            float(valor),
-                "apertura":        detalle.get("apertura"),
-                "maximo":          detalle.get("maximo"),
-                "minimo":          detalle.get("minimo"),
-                "cierre_anterior": detalle.get("closing_price"),
-                "monto_operado":   detalle.get("monto_operado"),
-            }).execute()
-        except Exception as e:
-            # Que falte la tabla no puede tumbar el relay: el precio en `prices`
-            # es lo que consumen los motores, el histórico es accesorio.
-            print(f"[{datetime.now():%H:%M:%S}] [WARN] no se pudo historizar: {str(e)[:90]}")
 
     monto = detalle.get("monto_operado")
     extra = f"  monto acum. {monto:,.0f}" if monto else ""
