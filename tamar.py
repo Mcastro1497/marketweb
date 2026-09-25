@@ -74,6 +74,17 @@ def tamar_tem(tamar_dec: float, margen_dec: float) -> float:
     tea = base ** (365 / 32)
     return tea ** (1 / 12) - 1
 
+def tamar_tna(tem_dec: float) -> float:
+    """Inversa exacta de tamar_tem(x, 0): de TEM mensual a la TNA que la produce.
+
+        TEM = [(1 + x/(365/32))^(365/32)]^(1/12) − 1
+        =>  x = (365/32) · [(1 + TEM)^(12·32/365) − 1]
+
+    Se usa para el margen de mercado: el spread sobre TAMAR al que cotiza hoy,
+    que no es el de emisión salvo que el bono esté justo a la par.
+    """
+    return (365 / 32) * ((1 + tem_dec) ** (12 * 32 / 365) - 1)
+
 # ============================ días hábiles / feriados ============================
 def _pick(row: dict, candidatos):
     for c in candidatos:
@@ -158,6 +169,19 @@ def cargar_instrumentos_tamar():
              .execute())
     return res.data or []
 
+_PRICES_COLS = None
+def prices_cols() -> set:
+    """Columnas reales de `prices`, cacheadas. Sirve para no mandar en el upsert
+    una columna que todavía no se migró: PostgREST rechaza la fila entera."""
+    global _PRICES_COLS
+    if _PRICES_COLS is None:
+        try:
+            r = sb.table("prices").select("*").limit(1).execute()
+            _PRICES_COLS = set(r.data[0].keys()) if r.data else set()
+        except Exception:
+            _PRICES_COLS = set()
+    return _PRICES_COLS
+
 def cargar_fila_precio(symbol: str):
     res = sb.table("prices").select("*").eq("symbol", symbol).limit(1).execute()
     return (res.data or [None])[0]
@@ -238,6 +262,19 @@ def valuar_bono(inst: dict, tamar_obs: dict, feriados: set, hoy: date):
     vt = 100 * (1 + tem) ** ((dias360(emision, hoy) / 360) * 12)
     paridad = precio / vt * 100
 
+    # MARGEN DE MERCADO: a qué spread sobre TAMAR cotiza HOY, no al de emisión.
+    # Quien compra a `precio` cobra `vpv` al vto: eso equivale a capitalizar a
+    # una TEM efectiva durante los días que faltan. Lo que exceda a la TAMAR
+    # esperada para ese tramo (tem_proy, porque de hoy al vto es todo futuro)
+    # es el margen, y se pasa a TNA con la inversa.
+    dias_rest = dias360(hoy, vto)
+    margen_mkt = None
+    if dias_rest > 0 and precio > 0:
+        tem_ef = (vpv / precio) ** (30 / dias_rest) - 1
+        tem_margen_mkt = tem_ef - tem_proy
+        if tem_margen_mkt > -0.99:
+            margen_mkt = tamar_tna(tem_margen_mkt)
+
     # ytm/duration_y como TIR_v5 + desglose TAMAR
     # unidades: TNA/TEM en decimal (0.0225 = 2.25%); vpv base 100; paridad en %
     payload = {
@@ -254,12 +291,18 @@ def valuar_bono(inst: dict, tamar_obs: dict, feriados: set, hoy: date):
         "vpv":           round(vpv, 4),             # base 100
         "paridad":       round(paridad, 4),         # en %
     }
+    if margen_mkt is not None and "margen_mercado" in prices_cols():
+        payload["margen_mercado"] = round(margen_mkt, 6)   # TNA en decimal (0.09 = 9%)
     print(f"[OK] {symbol} | margen {margen*100:.2f}%  ->  TEM margen {tem_margen*100:.3f}%")
     print(f"     observada  : TEM {tem_obs*100:6.3f}% (s/margen)   ({n_obs} días, peso {w_obs*100:.1f}%)")
     print(f"     proyectada : TEM {tem_proy*100:6.3f}% (s/margen)   ({n_proy} días, peso {w_proy*100:.1f}%)")
     print(f"     TEM TAMAR ponderada: {tem_tamar*100:.3f}%  (= {tem_obs*100:.3f}×{w_obs:.3f} + {tem_proy*100:.3f}×{w_proy:.3f})")
     print(f"     TEM total: {tem_tamar*100:.3f}% + {tem_margen*100:.3f}% margen = {tem*100:.3f}%   ->  VPV {vpv:.2f}")
     print(f"     precio {precio:.2f} | paridad {paridad:.2f}% | YTM {tea:.4%} | dur {md:.3f}")
+    if margen_mkt is not None:
+        falta = "" if "margen_mercado" in prices_cols() else "  [no se guarda: falta la columna]"
+        print(f"     margen de mercado: TAMAR {margen_mkt*100:+.2f}%  (emisión {margen*100:+.2f}%, "
+              f"dif {(margen_mkt-margen)*100:+.2f} pp){falta}")
     return symbol, payload
 
 # ============================ once / main ============================
