@@ -259,7 +259,9 @@ def valuar_bono(inst: dict, tamar_obs: dict, feriados: set, hoy: date):
     md = dias_corr / 365.0                           # Macaulay = plazo (bullet, pago único)
 
     # valor técnico (capitalizado a la TEM hasta hoy) y paridad — informativos
-    vt = 100 * (1 + tem) ** ((dias360(emision, hoy) / 360) * 12)
+    # Valor técnico a la LIQUIDACIÓN, no a hoy: el precio que se paga liquida ahí,
+    # así que la paridad tiene que comparar contra el devengado a esa fecha.
+    vt = 100 * (1 + tem) ** ((dias360(emision, fecha_liq) / 360) * 12)
     paridad = precio / vt * 100
 
     # MARGEN DE MERCADO: a qué spread sobre TAMAR cotiza HOY, no al de emisión.
@@ -267,13 +269,15 @@ def valuar_bono(inst: dict, tamar_obs: dict, feriados: set, hoy: date):
     # una TEM efectiva durante los días que faltan. Lo que exceda a la TAMAR
     # esperada para ese tramo (tem_proy, porque de hoy al vto es todo futuro)
     # es el margen, y se pasa a TNA con la inversa.
-    dias_rest = dias360(hoy, vto)
+    dias_rest = dias360(fecha_liq, vto)
     margen_mkt = None
     if dias_rest > 0 and precio > 0:
         tem_ef = (vpv / precio) ** (30 / dias_rest) - 1
-        tem_margen_mkt = tem_ef - tem_proy
-        if tem_margen_mkt > -0.99:
-            margen_mkt = tamar_tna(tem_margen_mkt)
+        # Se resta TNA contra TNA, no TEM contra TEM: es el criterio del
+        # terminal, y el margen de emisión también está expresado en TNA.
+        # La diferencia entre los dos caminos es chica (~0,01 pp) pero así
+        # el número es comparable contra la pantalla sin explicaciones.
+        margen_mkt = tamar_tna(tem_ef) - proy
 
     # ytm/duration_y como TIR_v5 + desglose TAMAR
     # unidades: TNA/TEM en decimal (0.0225 = 2.25%); vpv base 100; paridad en %
