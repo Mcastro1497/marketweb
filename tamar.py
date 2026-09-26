@@ -261,7 +261,14 @@ def valuar_bono(inst: dict, tamar_obs: dict, feriados: set, hoy: date):
     # valor técnico (capitalizado a la TEM hasta hoy) y paridad — informativos
     # Valor técnico a la LIQUIDACIÓN, no a hoy: el precio que se paga liquida ahí,
     # así que la paridad tiene que comparar contra el devengado a esa fecha.
-    vt = 100 * (1 + tem) ** ((dias360(emision, fecha_liq) / 360) * 12)
+    #
+    # Se devenga en períodos de 32 días, que es la convención de la TAMAR
+    # (la tasa se define como TNA 32/365), no en meses de 30. Sobre 148 días
+    # corridos de TMG28 la diferencia es 113,10 contra 112,91 — el terminal
+    # marca 112,92. `tna_total` es la TNA equivalente a la TEM total y
+    # reproduce la "Tasa de interés" de la pantalla.
+    tna_total = tamar_tna(tem)
+    vt = 100 * (1 + tna_total / (365 / 32)) ** (dias360(emision, fecha_liq) / 32)
     paridad = precio / vt * 100
 
     # MARGEN DE MERCADO: a qué spread sobre TAMAR cotiza HOY, no al de emisión.
