@@ -129,11 +129,10 @@ class Referencia:
         t0 = time.monotonic()
         self.ctx = P.Ctx(self.hoy or date.today())
         self.insts = P.cargar_instrumentos()
-        # Sin fallback por estructura: acá sólo se valúan los bonos con patas
-        # cargadas a mano (los duales). El resto del universo lo cubre más abajo
-        # tir_y_duracion con su propio descuento de flujos, que es lo que hace
-        # que este bucle pueda correr cada pocos segundos.
-        self.patas = P.cargar_patas(self.insts, fallback=False)
+        # Sólo las patas curadas a mano (los duales). El resto del universo lo
+        # cubre más abajo tir_y_duracion con su propio descuento de flujos, que
+        # es lo que hace que este bucle pueda correr cada pocos segundos.
+        self.patas = P.cargar_patas(self.insts, solo_manuales=True)
         self.esc = P.cargar_escenario(self.escenario)
         # Forzar las cachés perezosas ahora y no en el primer ciclo, para que el
         # costo no aparezca disfrazado de latencia de valuación.

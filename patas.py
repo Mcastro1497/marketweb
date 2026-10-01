@@ -1209,33 +1209,91 @@ def cargar_escenario(sid: str) -> dict:
     return ((res.data or [{}])[0].get("supuestos")) or {}
 
 
-def cargar_patas(insts: dict, fallback: bool = True) -> dict:
-    """{symbol: [(leg, params), ...]}: instrument_legs manda, y lo que no está
-    ahí se deduce de la estructura de pagos del bono.
+MARCA_DERIVADA = "_origen"          # en instrument_legs.params de las patas deducidas
+ORIGEN_ESTRUCTURA = "estructura"
+
+
+def cargar_patas(insts: dict, solo_manuales: bool = False) -> dict:
+    """{symbol: [(leg, params), ...]}: lo cargado a mano manda, y lo que no está
+    se deduce de la estructura de pagos del bono.
 
     La tabla existe para los casos que no se pueden deducir —un margen que no
-    está en la ficha, un fx_base, una pata que el prospecto define raro— y es
-    siempre la que gana. Pero cargar a mano los 400 instrumentos activos no
-    escala y, peor, deja sin valuar a cada bono nuevo hasta que alguien se
-    acuerde de insertarle las patas. Con el fallback, un instrumento nuevo entra
-    valuado el mismo día que se carga.
+    está en la ficha, un fx_base, una pata que el prospecto define raro— y
+    siempre gana. Pero cargar a mano los 400 activos no escala y, peor, deja sin
+    valuar a cada bono nuevo hasta que alguien se acuerde de insertarle las
+    patas.
 
-    `fallback=False` devuelve sólo lo cargado en la tabla. Lo usa valuar_loop,
+    Las deducidas se marcan con params["_origen"]="estructura" y se vuelven a
+    deducir en cada corrida, así un cambio en la ficha se propaga. Las cargadas a
+    mano no se tocan nunca. `sincronizar_patas` es lo que las escribe: tienen que
+    estar en la tabla porque `valuations` tiene una foreign key contra ella.
+
+    `solo_manuales=True` devuelve nada más lo curado a mano. Lo usa valuar_loop,
     que durante la rueda ya resuelve el resto del universo con su propio
-    descuento de flujos: deducir patas ahí le multiplicaría por diez el trabajo
+    descuento de flujos: valuar los 400 ahí le multiplicaría por diez el trabajo
     de cada ciclo para reescribir lo mismo.
     """
     q = sb.table("instrument_legs").select("symbol, leg, params")
     if insts:
         q = q.in_("symbol", list(insts))
-    out = {}
+    tabla = {}
     for r in (q.execute().data or []):
-        out.setdefault(r["symbol"], []).append((r["leg"], r.get("params") or {}))
-    if fallback:
-        for sym, i in insts.items():
-            if sym not in out:
-                out[sym] = patas_por_estructura(i)
+        tabla.setdefault(r["symbol"], []).append((r["leg"], r.get("params") or {}))
+
+    # Un símbolo es "manual" si alguna de sus patas NO está marcada como derivada.
+    # Se mira por símbolo y no por pata: si alguien cargó a mano una de las dos
+    # patas de un dual, rededucir la otra podría dejar un par incoherente.
+    manual = {sym for sym, v in tabla.items()
+              if any((p or {}).get(MARCA_DERIVADA) != ORIGEN_ESTRUCTURA for _lg, p in v)}
+    if solo_manuales:
+        return {sym: v for sym, v in tabla.items() if sym in manual}
+
+    out = {}
+    for sym, i in insts.items():
+        out[sym] = tabla[sym] if sym in manual else patas_por_estructura(i)
     return out
+
+
+def sincronizar_patas(insts: dict, patas: dict) -> tuple:
+    """Deja en instrument_legs las patas deducidas, y borra las que sobraron.
+
+    Hace falta porque `valuations` referencia (symbol, leg) contra esta tabla:
+    sin la fila, el upsert de la valuación rebota con violación de foreign key.
+    Escribirlas además las hace auditables —se ve qué dedujo el motor— y
+    editables: si alguien le saca la marca y le corrige un parámetro, la corrida
+    siguiente respeta lo que cargó.
+
+    Devuelve (altas_o_cambios, borradas).
+    """
+    actuales = {}
+    for r in (sb.table("instrument_legs").select("symbol, leg, params").execute().data or []):
+        actuales[(r["symbol"], r["leg"])] = r.get("params") or {}
+    manual = {sym for (sym, _lg), p in actuales.items()
+              if p.get(MARCA_DERIVADA) != ORIGEN_ESTRUCTURA}
+
+    quiero, filas = set(), []
+    for sym, legs in patas.items():
+        if sym in manual:
+            continue
+        for leg, p in legs:
+            quiero.add((sym, leg))
+            nuevo = dict(p or {})
+            nuevo[MARCA_DERIVADA] = ORIGEN_ESTRUCTURA
+            if actuales.get((sym, leg)) != nuevo:
+                filas.append({"symbol": sym, "leg": leg, "params": nuevo})
+
+    # Sobrantes: derivadas que ya no corresponden (cambió la ficha, o el bono
+    # salió de activos). Las manuales no se tocan.
+    sobran = [k for k, p in actuales.items()
+              if p.get(MARCA_DERIVADA) == ORIGEN_ESTRUCTURA and k not in quiero
+              and k[0] in insts]
+
+    for i in range(0, len(filas), 500):
+        sb.table("instrument_legs").upsert(filas[i:i + 500]).execute()
+    for sym, leg in sobran:
+        sb.table("valuations").delete().eq("symbol", sym).eq("leg", leg).execute()
+        sb.table("instrument_legs").delete().eq("symbol", sym).eq("leg", leg).execute()
+    return len(filas), len(sobran)
 
 
 def patas_sinteticas(insts: dict) -> dict:
@@ -1398,6 +1456,16 @@ def once(args) -> int:
     insts = cargar_instrumentos(symbols)
     patas = patas_sinteticas(insts) if args.sin_tablas else cargar_patas(insts)
     esc = {} if args.sin_tablas else cargar_escenario(args.scenario)
+
+    # Las patas deducidas tienen que existir en instrument_legs antes de escribir
+    # una valuación: `valuations` las referencia por foreign key. Con --symbols no
+    # se sincroniza, porque el borrado de sobrantes sólo puede decidirse viendo el
+    # universo completo.
+    if not args.dry_run and not args.sin_tablas and not symbols:
+        altas, bajas = sincronizar_patas(insts, patas)
+        if altas or bajas:
+            print(f"[LEGS] {altas} patas deducidas escritas, {bajas} sobrantes borradas")
+
     precios = cargar_precios(list(patas.keys()) or None)
 
     n = 0
