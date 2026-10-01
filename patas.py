@@ -1473,6 +1473,34 @@ def valuar_simbolo(ctx: Ctx, inst: dict, patas: list, esc: dict, prow: Optional[
             if pata.vt:
                 par = precio / pata.vt * 100
 
+        # ── margen de mercado de una pata TAMAR ──
+        # A qué spread sobre la TAMAR esperada cotiza el bono. Es la columna
+        # "Margen mkt." del panel y hasta ahora la escribía sólo tamar.py, que
+        # para un bono con cupones capitaliza la vida entera y da disparates: a
+        # RVS1O le ponía TAMAR +620 pp.
+        #
+        # Se replica la convención de tamar.py al pie de la letra —TEM sobre
+        # períodos de 30 días con días 30/360, y la resta en TNA contra TNA— para
+        # que el número de los bullet no se mueva ni un bp: es el que se validó
+        # contra el terminal. Lo único nuevo es de dónde sale la TEM cuando el
+        # bono paga cupones: ahí no hay un vpv/precio único y se deriva de la TIR.
+        #
+        # No se calcula para BADLAR: su cupón devenga TNA·días/365 simple, así que
+        # pasar por tamar_tna() —que capitaliza en períodos de 32 días— mezclaría
+        # convenciones y el margen saldría corrido.
+        margen_mkt = None
+        if leg == "TAMAR" and pata.driver is not None and precio and precio > 0:
+            tem_ef = None
+            if pata.flujos:
+                if ytm_nat is not None:
+                    tem_ef = (1 + ytm_nat) ** (30 / 360) - 1
+            else:
+                d360 = dias360(fecha_liq, inst["_vencimiento"])
+                if d360 > 0:
+                    tem_ef = (pata.vpv / precio) ** (30 / d360) - 1
+            if tem_ef is not None and tem_ef > -1:
+                margen_mkt = tamar_tna(tem_ef) - pata.driver
+
         be = None
         if len(vals) > 1 and pata.driver is not None:
             rival = max(v[0].vpv for lg, v in vals.items() if lg != leg)
@@ -1483,7 +1511,7 @@ def valuar_simbolo(ctx: Ctx, inst: dict, patas: list, esc: dict, prow: Optional[
             "is_winner": leg == ganadora,
             "ytm": ytm, "ytm_nativa": ytm_nat, "ytm_conv": pata.conv,
             "duration_y": dur, "paridad": par, "breakeven": be,
-            "precio": precio,
+            "margen_mercado": margen_mkt, "precio": precio,
         }))
     return out
 
@@ -1593,6 +1621,8 @@ def once(args) -> int:
                 head["duration_y"] = _r(g[2]["duration_y"], 6)
             if g[2]["paridad"] is not None:
                 head["paridad"] = _r(g[2]["paridad"], 4)
+            if g[2]["margen_mercado"] is not None:
+                head["margen_mercado"] = _r(g[2]["margen_mercado"], 6)
         sb.table("prices").upsert(head).execute()
 
     print(f"\n[PATAS] {n} instrumentos valuados"
