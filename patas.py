@@ -1,36 +1,62 @@
 """
-patas.py — Motor genérico de valuación por patas (bonos bullet y duales).
+patas.py — Motor genérico de valuación por ESTRUCTURA DE PAGOS.
 
-Un bono no tiene "un tipo", tiene patas. Un TAMAR común es un bono de UNA pata;
-un dual es un bono de DOS. Al vencimiento paga el máximo entre ellas.
+Un bono no se valúa por quién lo emitió, se valúa por lo que paga. Un CER
+provincial y un CER del Tesoro son el mismo problema; un corporativo en dólares
+y un hard dollar soberano también. `instrument_type` (ON, HD, CER, SUBSOB, DUAL)
+dice de dónde viene el papel y no alcanza para valuarlo: lo que decide es cómo
+se ajusta el capital, en qué moneda paga y si paga todo junto al final o
+amortiza antes.
+
+De ahí salen las patas. Un bono no tiene "un tipo", tiene patas: una TAMAR común
+es un bono de UNA pata, un dual es un bono de DOS y al vencimiento paga el
+máximo entre ellas. Las patas de cada bono se deducen de su ficha
+(`patas_por_estructura`) y instrument_legs queda sólo para los overrides: lo que
+el prospecto define raro y no se puede leer de la ficha.
+
+PATAS
+    HD      sin ajuste, paga dólares          -> TIR en USD (absorbe tir.py)
+    FIJA    sin ajuste, paga pesos            -> TIR nominal en pesos
+    CER     capital ajustado por CER          -> TIR real
+    DLK     capital atado al A3500            -> TIR en USD
+    TAMAR   TAMAR promedio + margen           -> TIR nominal en pesos
+    BADLAR  BADLAR + margen                   -> TIR nominal en pesos
+
+BULLET vs CUPONES
+    Un bono que paga todo al vencimiento se resuelve en forma cerrada: el motor
+    proyecta el ajuste a la fecha de pago y deja un `driver` despejable, que es
+    lo que necesita el breakeven de un dual. Uno que amortiza o paga renta antes
+    se resuelve descontando su calendario (instrument_flows) por XIRR. Cada motor
+    elige solo cuál de los dos le toca; ver `es_bullet`.
 
 Lee:
-  - instrument_legs  (symbol, leg, params)   -> qué patas tiene cada bono
-  - scenarios        (id, supuestos)         -> supuestos de proyección
-  - instruments, prices, holidays, series (cer / tamar_tna / a3500)
+  - instruments      (ficha)                  -> de ahí se deducen las patas
+  - instrument_legs  (symbol, leg, params)    -> overrides, mandan sobre la ficha
+  - instrument_flows (calendario de pagos)    -> bonos con cupones
+  - scenarios        (id, supuestos)          -> supuestos de proyección
+  - prices, holidays, series (cer / tamar_tna / a3500)
 Escribe:
-  - valuations       (symbol, leg, scenario) -> una fila por pata
+  - valuations       (symbol, leg, scenario)  -> una fila por pata
   - prices           (headline de la pata ganadora: ytm/duration_y/vpv/paridad)
 
 CONTRATO DE UN MOTOR
     motor(ctx, inst, params, esc, driver=None) -> Pata
 
-    Devuelve `vpv` SIEMPRE en pesos, base 100 de VN, al vencimiento. Es lo único
-    que hace comparables a las patas entre sí. `driver` es la variable que maneja
-    la pata (TNA TAMAR, inflación mensual, dólar al vto.); si viene, pisa el
-    supuesto del escenario. Ese parámetro es lo que permite calcular el breakeven
-    por bisección sin escribir una fórmula por cada combinación de patas.
+    Devuelve `vpv` SIEMPRE en pesos, base 100 de VN. Es lo único que hace
+    comparables a las patas entre sí. `driver` es la variable que maneja la pata
+    (TNA TAMAR, inflación mensual, dólar al vto.); si viene, pisa el supuesto del
+    escenario. Ese parámetro es lo que permite calcular el breakeven por
+    bisección sin escribir una fórmula por cada combinación de patas.
 
     Sumar un tipo de pata nuevo = una función + una entrada en MOTORES.
-    Sumar un dual nuevo         = dos INSERT en instrument_legs, sin tocar código.
+    Sumar un dual nuevo         = nada, si la ficha lo dice.
 
 Uso:
     python patas.py                          # valúa todo y escribe
     python patas.py --dry-run                # no escribe nada
     python patas.py --check                  # compara contra lo que dejó tamar.py
     python patas.py --symbols TMF27,TTS26
-    python patas.py --sin-tablas             # deriva las patas de instruments_v2
-                                             #   (permite validar antes del DDL)
+    python patas.py --sin-tablas             # ignora instrument_legs: deduce todo
     python patas.py --loop                   # ciclo continuo cada INTERVAL_SEC
 """
 import argparse
@@ -38,7 +64,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Callable, Optional
+from typing import Callable, Optional, NamedTuple
 
 from dotenv import load_dotenv
 from supabase import create_client
@@ -57,6 +83,18 @@ POSIBLES_PRECIO = ["price_ars", "closing_price", "price", "last", "px", "ultimo"
 
 
 # ════════════════════════════ contrato ════════════════════════════
+class Flujo(NamedTuple):
+    """Una fila de instrument_flows. Los montos van SIN AJUSTE, por cada 100 de
+    nominal ORIGINAL: en un CER el capital figura como 20, no como 20 por el
+    coeficiente, y el ajuste lo aplica el motor. `dias` es el plazo del cupón,
+    que es lo que permite devengar sin adivinar la convención de cada bono."""
+    fecha:        date
+    interes:      Optional[float]
+    amortizacion: Optional[float]
+    total:        Optional[float]
+    dias:         Optional[int]
+
+
 @dataclass
 class Pata:
     vpv:    float                                   # ARS, base 100, al vencimiento
@@ -79,6 +117,27 @@ class Pata:
     conv:         str = "nominal_ars"
     base_nativa:  Optional[float] = None
 
+    # ── Bonos con cupones ──
+    # El resto de la clase asume pago único al vencimiento: `vpv` es ese pago y
+    # la TIR sale de (vpv/precio)^(365/días). Un bono que amortiza o paga renta
+    # antes no entra en esa cuenta. Cuando la pata trae `flujos` —[(fecha, monto
+    # en la unidad de `conv`), ...]— la TIR se resuelve por XIRR sobre ellos y
+    # la duration es la de Macaulay de verdad, no el plazo al vencimiento.
+    # `vpv` sigue existiendo para comparar patas entre sí en los duales, que son
+    # todos bullet.
+    flujos: Optional[list] = None
+    # Pesos por unidad de `conv`, para pasar el precio de mercado —que viene en
+    # pesos— a la unidad del vector: el coeficiente CER vigente, el A3500, el
+    # MEP. None = el vector ya está en pesos. Sin esto la TIR de un bono en
+    # dólares saldría comparando pesos contra dólares.
+    fx_nativa: Optional[float] = None
+    # Columnas de `prices` que YA vienen en la unidad de `conv`, si existen. Un
+    # hard dollar cotiza en dólares de verdad (ticker D/C) y ese precio es el
+    # bueno: convertir el precio en pesos al MEP es una aproximación, y en varios
+    # ON `price_ars` está viejo o directamente en NULL. Si ninguna trae dato se
+    # cae al precio en pesos dividido `fx_nativa`.
+    precio_cols: Optional[list] = None
+
 
 # ════════════════════════════ helpers ════════════════════════════
 def dias360(d1: date, d2: date) -> int:
@@ -94,6 +153,83 @@ def dias360(d1: date, d2: date) -> int:
 def meses360(d1: date, d2: date) -> float:
     """Exponente (DÍAS/360)*12 de la fórmula del prospecto."""
     return dias360(d1, d2) / 30.0
+
+
+def _yf(d0: date, d1: date) -> float:
+    """Años actual/365 entre dos fechas (criterio XIRR)."""
+    return (d1 - d0).days / 365.0
+
+
+def xirr(flujos, guess: float = 0.10) -> Optional[float]:
+    """TIR de un vector [(fecha, monto)] con el precio ya incluido en negativo.
+
+    Newton con caída a bisección: Newton solo no alcanza porque con paridades
+    muy bajas la derivada se achata y diverge. El barrido de signos cubre desde
+    -90% hasta 1000%, que es el rango en el que aparecen las ON argentinas.
+    """
+    fl = sorted(flujos, key=lambda x: x[0])
+    if len(fl) < 2:
+        return None
+    d0 = fl[0][0]
+
+    def f(r):
+        one = 1.0 + r
+        if one <= 0:
+            return None
+        return sum(c / one ** _yf(d0, d) for d, c in fl)
+
+    r = guess
+    for _ in range(80):
+        one = 1.0 + r
+        if one <= 0:
+            break
+        v = sum(c / one ** _yf(d0, d) for d, c in fl)
+        dv = sum(c * (-_yf(d0, d)) * one ** (-_yf(d0, d) - 1) for d, c in fl)
+        if not dv or abs(dv) < 1e-18:
+            break
+        rn = r - v / dv
+        if rn <= -0.9999:
+            break
+        if abs(rn - r) < 1e-12:
+            return rn
+        r = rn
+
+    lo = hi = None
+    prev_x = prev_y = None
+    for x in (-0.9, -0.5, -0.1, 0.0, 0.02, 0.05, 0.10, 0.20, 0.40, 0.8, 1.5, 3.0, 10.0):
+        y = f(x)
+        if y is None:
+            continue
+        if prev_y is not None and prev_y * y <= 0:
+            lo, hi = prev_x, x
+            break
+        prev_x, prev_y = x, y
+    if lo is None:
+        return None
+    flo = f(lo)
+    for _ in range(200):
+        m = 0.5 * (lo + hi)
+        fm = f(m)
+        if fm is None:
+            return None
+        if abs(fm) < 1e-10 or (hi - lo) < 1e-12:
+            return m
+        if flo * fm <= 0:
+            hi = m
+        else:
+            lo, flo = m, fm
+    return 0.5 * (lo + hi)
+
+
+def macaulay(flujos, r: float) -> Optional[float]:
+    """Duration de Macaulay en años sobre los flujos FUTUROS (sin el precio)."""
+    if r is None or r <= -0.9999 or not flujos:
+        return None
+    d0 = min(d for d, _ in flujos)
+    pv = sum(c / (1 + r) ** _yf(d0, d) for d, c in flujos)
+    if pv <= 0:
+        return None
+    return sum(_yf(d0, d) * (c / (1 + r) ** _yf(d0, d)) for d, c in flujos) / pv
 
 
 def tamar_tem(tna: float, margen: float = 0.0) -> float:
@@ -166,6 +302,58 @@ class Ctx:
         self._cer = None
         self._rem = {}
         self._fx = None
+        self._flujos = None
+        self._mep = None
+
+    @property
+    def flujos(self) -> dict:
+        """{symbol: [Flujo, ...]} de instrument_flows, ordenado por fecha.
+
+        Se pagina igual que `series`: PostgREST corta en 1.000 y no avisa, y la
+        tabla ya pasa las 2.900 filas. Un calendario truncado no da error, da una
+        TIR alta y creíble."""
+        if self._flujos is None:
+            out, desde = {}, 0
+            while True:
+                d = (sb.table("instrument_flows")
+                       .select("symbol, fecha_pago, interes, amortizacion, total, dias")
+                       .order("fecha_pago")
+                       .range(desde, desde + 999).execute().data or [])
+                for r in d:
+                    try:
+                        f = date.fromisoformat(str(r["fecha_pago"])[:10])
+                    except (ValueError, TypeError):
+                        continue
+                    dias = _f(r.get("dias"))
+                    out.setdefault(r["symbol"], []).append(Flujo(
+                        f, _f(r.get("interes")), _f(r.get("amortizacion")),
+                        _f(r.get("total")), int(dias) if dias else None))
+                if len(d) < 1000:
+                    break
+                desde += 1000
+            for v in out.values():
+                v.sort(key=lambda x: x.fecha)
+            self._flujos = out
+        return self._flujos
+
+    @property
+    def fx_mep(self) -> float:
+        """MEP, el dólar al que se liquida un bono hard dollar. precios2.py lo
+        calcula como AL30/AL30D y lo escribe en prices.fx_mep de TODAS las filas,
+        así que cualquiera sirve; se toma la más reciente.
+
+        No es el A3500 de `fx_spot`: un dólar linked paga pesos atados al
+        oficial, un hard dollar paga dólares de verdad. Usar uno por el otro
+        mueve la TIR varios puntos."""
+        if self._mep is None:
+            d = (sb.table("prices").select("symbol, fx_mep, ts")
+                   .not_.is_("fx_mep", "null")
+                   .order("ts", desc=True).limit(1).execute().data or [])
+            v = _f(d[0].get("fx_mep")) if d else None
+            if not v or v <= 0:
+                raise ValueError("sin fx_mep en prices (lo escribe precios2.py)")
+            self._mep = v
+        return self._mep
 
     @property
     def feriados(self) -> set:
@@ -349,21 +537,165 @@ class Ctx:
 
 
 # ════════════════════════════ motores ════════════════════════════
+def calendario(ctx: Ctx, sym: str, desde: date):
+    """Lo que queda por cobrar de `sym` según instrument_flows, visto desde
+    `desde` (la liquidación: un cupón que paga ese mismo día no se cobra).
+
+        -> (futuros, vn_residual, devengado)   o None si no hay calendario
+
+    `futuros` es [(fecha, monto)] con los montos SIN AJUSTE; `vn_residual` es el
+    capital que falta amortizar y `devengado` el interés corrido del cupón en
+    curso. Las tres cosas en la misma unidad: por 100 de nominal original.
+
+    El devengado se prorratea con el `dias` del propio cupón, que es el plazo con
+    el que se calculó su `interes`. Así la convención sale del calendario y no
+    hay que deducirla por bono —que es de dónde salen las diferencias de unos
+    pocos bps contra el bróker.
+    """
+    todos = ctx.flujos.get(sym) or []
+    if not todos:
+        return None
+    futuros = [(f.fecha, f.total) for f in todos if f.fecha > desde and f.total]
+    if not futuros:
+        return None
+    vn_res = sum(f.amortizacion or 0.0 for f in todos if f.fecha > desde)
+
+    prox = next((f for f in todos if f.fecha > desde), None)
+    devengado = 0.0
+    if prox is not None and prox.interes and prox.dias:
+        corridos = prox.dias - (prox.fecha - desde).days
+        devengado = prox.interes * min(1.0, max(0.0, corridos / prox.dias))
+    return futuros, vn_res, devengado
+
+
+def es_bullet(cal, vto: date, capital: float = 100.0) -> bool:
+    """Un único pago, al vencimiento, por el capital ENTERO. Para estos el camino
+    cerrado del motor es MEJOR que descontar el vector: proyecta el ajuste a la
+    fecha de pago y deja un `driver` despejable, que es lo que necesita el
+    breakeven de un dual.
+
+    El `capital` importa: la forma cerrada arranca de 100 de nominal y capitaliza
+    desde la emisión, así que no vale para un bono que ya amortizó. A TX26 le
+    queda un solo pago al vencimiento pero de 20 de capital —amortizó el 80%— y
+    valuarlo como bullet lo multiplicaba por cinco.
+
+    Se pide capital >= 100 y no == 100 a propósito: si falta capital el bono
+    amortizó y manda el calendario, pero si SOBRA es que el calendario está en
+    otra unidad —TMVE8 trae el nominal en dólares ya pasado al tipo de cambio
+    inicial, 149.983 por cada 100— y ahí la forma cerrada sigue siendo la buena.
+    """
+    futuros, vn_res, _dev = cal
+    return (len(futuros) == 1 and futuros[0][0] >= vto
+            and vn_res >= capital - 1e-6)
+
+
 def motor_fija(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
     """Tasa fija efectiva mensual capitalizable hasta el vencimiento.
        VPV = 100 * (1 + Tm) ^ ((DÍAS/360)*12)      params: {"tem": 0.0217}
        No tiene driver: es determinística, siempre es el lado 'target' del breakeven."""
-    tem = _f(p.get("tem"))
-    if tem is None:
-        raise ValueError("pata FIJA sin params.tem")
     emi, vto = inst["_emision"], inst["_vencimiento"]
     base = 100 * (_f(p.get("fx_base"), 1.0) or 1.0)
+
+    # Con calendario el cupón no se deduce de nada: los montos en pesos están
+    # escritos y son ciertos. Es el caso de los corporativos y sub soberanos en
+    # pesos a tasa fija, que antes quedaban sin valuar porque `tem` no alcanza
+    # para describir un bono que amortiza.
+    cal = calendario(ctx, inst["symbol"], ctx.fecha_liq)
+    # La forma cerrada sólo tiene sentido con `tem`: describe una LECAP, que
+    # capitaliza desde la emisión y paga todo junto. Sin `tem` —un bono que paga
+    # renta, o una letra a descuento como LBN26— el calendario es el único
+    # camino, y además es exacto: los montos en pesos están escritos.
+    if cal and not (p.get("tem") is not None and es_bullet(cal, vto, base)):
+        futuros, vn_res, dev = cal
+        return Pata(
+            vpv=sum(c for _d, c in futuros) * (base / 100),
+            tem=_f(p.get("tem")), driver=None,
+            vt=(vn_res + dev) * (base / 100),
+            conv="nominal_ars", flujos=[(d, c * base / 100) for d, c in futuros],
+            params={"n_pagos": len(futuros), "vn_residual": round(vn_res, 6),
+                    "devengado": round(dev, 6), "base": round(base, 6)},
+        )
+
+    tem = _f(p.get("tem"))
+    if tem is None:
+        raise ValueError("pata FIJA sin params.tem ni calendario de pagos")
     return Pata(
         vpv=base * (1 + tem) ** meses360(emi, vto),
         tem=tem,
         driver=None,
         vt=base * (1 + tem) ** max(0.0, meses360(emi, ctx.hoy)),
         params={"tem_fija": round(tem, 8), "base": round(base, 6)},
+    )
+
+
+def _tamar_tna_futura(ctx: Ctx, esc: dict, driver) -> tuple:
+    """TNA con la que se proyecta el tramo de TAMAR que todavía no se publicó."""
+    if driver is not None:
+        return float(driver), "driver"
+    if esc.get("tamar_tna") is not None:
+        return float(esc["tamar_tna"]), "escenario"
+    recientes = sorted(d for d in ctx.tamar if d <= ctx.hoy)[-N_PROY:]
+    if not recientes:
+        raise ValueError("sin TAMAR observada")
+    return sum(ctx.tamar[d] for d in recientes) / len(recientes), f"prom. últimos {N_PROY}"
+
+
+def _tamar_con_cupones(ctx: Ctx, inst: dict, cal, margen: float, base: float,
+                       esc: dict, driver) -> Pata:
+    """TAMAR que amortiza o paga renta antes del vencimiento.
+
+    Acá no hay una sola ventana: cada cupón tiene la suya, [inicio-10h ; pago-10h],
+    y el bullet de motor_tamar no sirve. El cupón del período EN CURSO ya está
+    fijado —se determinó al arrancar el período— así que se toma el `interes` del
+    calendario tal cual. Los períodos que todavía no empezaron se recalculan con
+    la serie y, para el tramo sin publicar, con la TNA proyectada.
+
+    El devengamiento es TNA · días/365 sobre el capital residual, que es la
+    convención con la que el cargador armó el calendario (se verificó contra el
+    `interes` de los cupones ya fijados).
+    """
+    futuros, vn_res, dev = cal
+    tna_fut, origen = _tamar_tna_futura(ctx, esc, driver)
+    porf = {f.fecha: f for f in (ctx.flujos.get(inst["symbol"]) or [])}
+
+    # Capital residual durante cada período: el que todavía no amortizó, contando
+    # el pago del propio período.
+    resid, acum = {}, 0.0
+    for f_, _c in reversed(futuros):
+        acum += (porf[f_].amortizacion or 0.0) if f_ in porf else 0.0
+        resid[f_] = acum
+
+    vector, n_fijos, n_proy = [], 0, 0
+    for f_, monto in futuros:
+        fl = porf.get(f_)
+        if fl is None or not fl.dias:
+            vector.append((f_, monto)); n_fijos += 1
+            continue
+        ini = f_ - timedelta(days=fl.dias)
+        if ini <= ctx.hoy:
+            vector.append((f_, monto)); n_fijos += 1    # cupón ya fijado
+            continue
+        ventana = ctx.rango_habiles(ctx.habil_anterior(ini, 10),
+                                    ctx.habil_anterior(f_, 10))
+        obs = [ctx.tamar[d] for d in ventana if d in ctx.tamar and d <= ctx.hoy]
+        n_f = sum(1 for d in ventana if d > ctx.hoy)
+        n_t = len(obs) + n_f
+        tna = ((sum(obs) + tna_fut * n_f) / n_t) if n_t else tna_fut
+        interes = resid[f_] * (tna + margen) * fl.dias / 365
+        vector.append((f_, interes + (fl.amortizacion or 0.0)))
+        n_proy += 1
+
+    k = base / 100
+    return Pata(
+        vpv=sum(c for _d, c in vector) * k,
+        tem=None, driver=tna_fut,
+        vt=(vn_res + dev) * k,
+        conv="nominal_ars", flujos=[(d, c * k) for d, c in vector],
+        params={"n_pagos": len(vector), "cupones_fijados": n_fijos,
+                "cupones_proyectados": n_proy, "tamar_proy": round(tna_fut, 8),
+                "margen": round(margen, 8), "vn_residual": round(vn_res, 6),
+                "devengado": round(dev, 6), "base": round(base, 6),
+                "origen_proy": origen},
     )
 
 
@@ -388,6 +720,16 @@ def motor_tamar(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
     emi, vto = inst["_emision"], inst["_vencimiento"]
     serie = ctx.tamar
 
+    cal = calendario(ctx, inst["symbol"], ctx.fecha_liq)
+    if cal and p.get("fx_base") is None and len(cal[0]) == 1 and cal[0][0][0] >= vto:
+        # Bullet con nominal en dólares (TMVE8): el capital del calendario ya
+        # viene convertido al tipo de cambio inicial, así que ESE es el 100 de
+        # esta pata. Deducirlo de acá evita tener que cargar el fx_base a mano
+        # por bono.
+        base = cal[1] or base
+    if cal and not es_bullet(cal, vto, base):
+        return _tamar_con_cupones(ctx, inst, cal, margen, base, esc, driver)
+
     ventana = ctx.rango_habiles(ctx.habil_anterior(emi, 10), ctx.habil_anterior(vto, 10))
     if not ventana:
         raise ValueError("ventana de TAMAR vacía")
@@ -406,15 +748,7 @@ def motor_tamar(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
     n_tot = n_obs + n_proy
     n_sin_dato = len(ventana) - n_tot
 
-    if driver is not None:
-        tna_fut, origen = float(driver), "driver"
-    elif esc.get("tamar_tna") is not None:
-        tna_fut, origen = float(esc["tamar_tna"]), "escenario"
-    else:
-        recientes = sorted(d for d in serie if d <= ctx.hoy)[-N_PROY:]
-        if not recientes:
-            raise ValueError("sin TAMAR observada")
-        tna_fut, origen = sum(serie[d] for d in recientes) / len(recientes), f"prom. últimos {N_PROY}"
+    tna_fut, origen = _tamar_tna_futura(ctx, esc, driver)
 
     # Promedio simple sobre TODA la ventana, y recién ahí a TEM (prospecto).
     tna_ventana = (sum(obs) + tna_fut * n_proy) / n_tot
@@ -518,14 +852,62 @@ def motor_cer(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
 
     meses = meses360(emi, vto)
     ajuste = cer1 / cer0
-    vpv = 100 * ajuste * (1 + tem) ** meses
 
-    # Valor técnico devengado: el CER APLICABLE hoy es el de 10 días hábiles
-    # antes de la liquidación, no el de hoy. El prospecto define el ajuste sobre
-    # la ventana [emisión-10h ; pago-10h], así que el coeficiente vigente arrastra
-    # ese rezago. Usar el CER de hoy sobrestima la TIR real ~30 bps.
+    # El CER aplicable a un pago es el de 10 días hábiles antes: el coeficiente
+    # vigente para liquidar hoy arrastra ese rezago. Usar el de hoy sobrestima
+    # la TIR ~30 bps.
     f_apl_cer = ctx.habil_anterior(ctx.fecha_liq, 10)
     cer_apl = ctx.cer_en(min(f_apl_cer, ult_obs))
+
+    cal = calendario(ctx, inst["symbol"], ctx.fecha_liq)
+    if cal and not es_bullet(cal, vto):
+        # Bono CER que amortiza o paga renta. Los montos del calendario están
+        # SIN ajustar, o sea expresados en pesos de la base CER del bono: eso es
+        # exactamente la unidad en la que se quotea un CER, y descontarlos
+        # contra el precio dividido por el coeficiente vigente da la TASA REAL
+        # directo, sin proyectar inflación.
+        #
+        # El VPV nominal sí necesita proyección: cada pago se multiplica por el
+        # CER estimado a su propia fecha de aplicación, no por el del último.
+        futuros, vn_res, dev = cal
+        # La senda de proyección se arma acá y no se reusa la del tramo bullet:
+        # si el vencimiento ya tiene CER publicado, ese tramo no la calcula, pero
+        # un bono con cupones igual puede tener pagos más allá del último dato.
+        if driver is not None:
+            senda_c, fb_c, origen_c = {}, float(driver), "driver"
+        else:
+            pct_c = esc.get("cer_percentil", "mediana")
+            r_c = ctx.rem_inflacion(pct_c)
+            senda_c = r_c["mensual"]
+            fb_c = senda_c.get((r_c["hasta"].year, r_c["hasta"].month), 0.0)
+            origen_c = f"REM {r_c['fecha_rem']} {pct_c}"
+
+        def _cer_proy(f: date) -> float:
+            fa = ctx.habil_anterior(f, 10)
+            if fa <= ult_obs:
+                return ctx.cer_en(fa)
+            fac, _ = capitalizar(ult_obs, fa, senda_c, fb_c)
+            return cer_ult * fac
+        vpv_nom = sum(c * _cer_proy(f) / cer0 for f, c in futuros)
+        params_cup = {
+            "cer_base": round(cer0, 8), "cer_ultimo": round(cer_ult, 8),
+            "cer_ult_fecha": str(ult_obs),
+            "cer_aplicable": round(cer_apl, 8),
+            "cer_apl_fecha": str(min(f_apl_cer, ult_obs)),
+            "n_pagos": len(futuros), "vn_residual": round(vn_res, 6),
+            "devengado": round(dev, 6), "origen_proy": origen_c,
+            "tem_cupon": round(tem, 8), "es_real": True,
+        }
+        return Pata(
+            vpv=vpv_nom, tem=None, driver=None,
+            vt=(vn_res + dev) * cer_apl / cer0,
+            conv="real_cer", flujos=futuros, fx_nativa=cer_apl / cer0,
+            params=params_cup,
+        )
+
+    vpv = 100 * ajuste * (1 + tem) ** meses
+
+    # Valor técnico devengado, con el mismo coeficiente rezagado de arriba.
     meses_dev = max(0.0, meses360(emi, ctx.hoy))
     vt = 100 * (cer_apl / cer0) * (1 + tem) ** meses_dev
 
@@ -588,6 +970,25 @@ def motor_dlk(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
 
     fx_spot = ctx.fx_spot
 
+    cal = calendario(ctx, inst["symbol"], ctx.fecha_liq)
+    if cal and not es_bullet(cal, vto):
+        # Dólar linked que amortiza o paga renta. Los montos del calendario son
+        # el nominal en dólares de cada pago; se liquidan en pesos al A3500, no
+        # al MEP. Descontarlos contra el precio pasado a dólares al A3500 da la
+        # TIR en dólares, que es la convención del mercado para estos bonos y no
+        # necesita proyectar devaluación.
+        futuros, vn_res, dev = cal
+        return Pata(
+            vpv=sum(c for _d, c in futuros) * fx_spot,
+            tem=None, driver=None,
+            vt=(vn_res + dev) * fx_spot,
+            conv="usd", flujos=futuros, fx_nativa=fx_spot,
+            base_nativa=sum(c for _d, c in futuros),
+            params={"n_pagos": len(futuros), "vn_residual": round(vn_res, 6),
+                    "devengado": round(dev, 6), "fx_spot": round(fx_spot, 6),
+                    "spread": round(spread, 8)},
+        )
+
     f_apl = ctx.habil_anterior(vto, 3)
     if f_apl <= ctx.hoy:
         fx1, extrap, origen = fx_spot, 0, "spot (vencido o ventana cerrada)"
@@ -627,7 +1028,69 @@ def motor_dlk(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
     )
 
 
+def motor_hd(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
+    """Bono sin ajuste que paga en dólares: el flujo es cierto en USD.
+
+    Es la familia más grande de la base —hard dollar soberanos y las ON en
+    dólares— y hasta ahora la resolvía tir.py por fuera, con su propia carga de
+    flujos y su propio XIRR. Acá entra al mismo contrato: `conv` queda en "usd",
+    el vector va en dólares y `fx_nativa` es el MEP, así que la TIR sale en
+    dólares contra el precio en pesos sin que el motor toque el precio.
+
+    `vpv` queda en pesos como el resto de las patas, pero para un bono que
+    amortiza es la suma sin descontar de lo que falta cobrar, no un pago único:
+    sirve para elegir ganadora en un dual y para nada más. Ningún dual tiene
+    pata HD hoy.
+    """
+    cal = calendario(ctx, inst["symbol"], ctx.fecha_liq)
+    if not cal:
+        raise ValueError("sin calendario de pagos")
+    futuros, vn_res, dev = cal
+    fx = _f(esc.get("fx_mep")) or ctx.fx_mep
+    return Pata(
+        vpv=sum(c for _d, c in futuros) * fx,
+        tem=None, driver=None,
+        vt=(vn_res + dev) * fx,
+        conv="usd", flujos=futuros, fx_nativa=fx,
+        precio_cols=["last", "price_ars_usd"],
+        base_nativa=sum(c for _d, c in futuros),
+        params={"n_pagos": len(futuros), "vn_residual": round(vn_res, 6),
+                "devengado": round(dev, 6), "fx_mep": round(fx, 4)},
+    )
+
+
+def motor_badlar(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
+    """BADLAR privados + margen, sobre el calendario del bono.
+
+    A diferencia de TAMAR, la serie de BADLAR todavía no está en `series`
+    (series_sync.py trae cer, tamar_tna, a3500 e ipc_mensual), así que el cupón
+    no se puede recalcular acá: se usa el `interes` que ya tiene el calendario,
+    que el cargador dejó con la BADLAR del día de la carga sostenida plana.
+
+    Eso vale para el cupón corriente —que ya está fijado— y es una proyección
+    para los siguientes. Queda marcado en params para que se vea de dónde sale
+    el número; cuando la serie entre al sync, este motor pasa a calcular los
+    cupones futuros como lo hace motor_tamar y el resto no cambia.
+    """
+    cal = calendario(ctx, inst["symbol"], ctx.fecha_liq)
+    if not cal:
+        raise ValueError("sin calendario de pagos")
+    futuros, vn_res, dev = cal
+    return Pata(
+        vpv=sum(c for _d, c in futuros),
+        tem=None, driver=None,
+        vt=vn_res + dev,
+        conv="nominal_ars", flujos=futuros,
+        params={"n_pagos": len(futuros), "vn_residual": round(vn_res, 6),
+                "devengado": round(dev, 6),
+                "margen": _f(inst.get("margen_ref")),
+                "origen_cupon": "calendario (BADLAR plana, sin serie en `series`)"},
+    )
+
+
 MOTORES: dict[str, Callable[..., Pata]] = {
+    "HD":     motor_hd,
+    "BADLAR": motor_badlar,
     "FIJA":  motor_fija,
     "TAMAR": motor_tamar,
     "CER":   motor_cer,
@@ -706,33 +1169,90 @@ def cargar_escenario(sid: str) -> dict:
     return ((res.data or [{}])[0].get("supuestos")) or {}
 
 
-def cargar_patas(symbols=None) -> dict:
-    """{symbol: [(leg, params), ...]} desde instrument_legs."""
+def cargar_patas(insts: dict) -> dict:
+    """{symbol: [(leg, params), ...]}: instrument_legs manda, y lo que no está
+    ahí se deduce de la estructura de pagos del bono.
+
+    La tabla existe para los casos que no se pueden deducir —un margen que no
+    está en la ficha, un fx_base, una pata que el prospecto define raro— y es
+    siempre la que gana. Pero cargar a mano los 400 instrumentos activos no
+    escala y, peor, deja sin valuar a cada bono nuevo hasta que alguien se
+    acuerde de insertarle las patas. Con el fallback, un instrumento nuevo entra
+    valuado el mismo día que se carga.
+    """
     q = sb.table("instrument_legs").select("symbol, leg, params")
-    if symbols:
-        q = q.in_("symbol", symbols)
+    if insts:
+        q = q.in_("symbol", list(insts))
     out = {}
     for r in (q.execute().data or []):
         out.setdefault(r["symbol"], []).append((r["leg"], r.get("params") or {}))
+    for sym, i in insts.items():
+        if sym not in out:
+            out[sym] = patas_por_estructura(i)
     return out
 
 
 def patas_sinteticas(insts: dict) -> dict:
-    """Misma regla que el backfill de 001_patas_duales.sql, en memoria. Permite
-    validar los motores antes de correr el DDL."""
+    """Las patas de TODOS los bonos deducidas de su estructura, ignorando
+    instrument_legs. --sin-tablas usa esto para ver qué haría el deductor puro,
+    sin que lo tape ningún override cargado a mano."""
     out = {}
     for sym, i in insts.items():
-        if i.get("periodicidad_int") != "Nula" or i.get("instrument_type") == "ON":
-            continue
-        ref = (i.get("referencias") or "").strip()
-        leg = {"Tamar": "TAMAR", "CER": "CER", "A3500": "DLK"}.get(ref, "FIJA")
-        p = {}
-        if leg == "TAMAR":
-            p["margen"] = _f(i.get("margen_ref"), 0.0)
-        elif leg == "FIJA" and i.get("tasa_int") is not None:
-            p["tem"] = _f(i.get("tasa_int"))
-        out[sym] = [(leg, p)]
+        for leg, p in patas_por_estructura(i):
+            out.setdefault(sym, []).append((leg, p))
     return out
+
+
+def patas_por_estructura(i: dict) -> list:
+    """Qué patas le tocan a un bono por su ESTRUCTURA DE PAGOS, no por quién lo
+    emitió. Un provincial CER y un soberano CER se valúan igual; un corporativo
+    en dólares y un hard dollar del Tesoro también. `instrument_type` dice de
+    dónde viene el papel y no sirve para valuar: lo que decide es el ajuste del
+    capital (`referencias`) y, cuando no hay ajuste, la moneda de pago.
+
+    Devuelve [(leg, params), ...]. Un dual lleva dos.
+    """
+    ref = (i.get("referencias") or "").strip()
+    margen = _f(i.get("margen_ref"), 0.0)
+
+    if ref == "Dual":
+        # Un dual cobra el máximo entre sus dos patas, y `referencias` dice
+        # "Dual" en los tres sabores que hay en la base sin distinguirlos. La
+        # pata TAMAR está siempre; la otra sale de la ficha:
+        #   nominal en dólares  -> dólar linked (TMVE8)
+        #   tasa fija cargada   -> tasa fija    (TTD26)
+        #   ninguna de las dos  -> CER          (TXMD8 y la familia TXM*)
+        otra = ("CER", {})
+        if (i.get("moneda_denom") or "").upper() == "USD":
+            otra = ("DLK", {"spread": 0.0})
+        elif i.get("tasa_int") is not None:
+            otra = ("FIJA", {"tem": _f(i.get("tasa_int"))})
+        # Cuando el nominal es en dólares la pata TAMAR devenga sobre ese nominal
+        # pasado a pesos al tipo de cambio INICIAL, que queda fijo desde la
+        # emisión. No hace falta pasarlo: el motor lo deduce del calendario, que
+        # ya trae la amortización convertida.
+        return [("TAMAR", {"margen": margen}), otra]
+    if ref == "Tamar":
+        return [("TAMAR", {"margen": margen})]
+    if ref == "CER":
+        return [("CER", {})]
+    if ref == "A3500":
+        return [("DLK", {})]
+    if ref == "Badlar":
+        return [("BADLAR", {})]
+
+    # Sin ajuste de capital: decide la moneda en la que paga.
+    if i.get("moneda_pago") == "USD":
+        return [("HD", {})]
+    p = {}
+    # `tasa_int` NO tiene una sola convención: en un bullet tipo LECAP es la TEM
+    # (es lo que hay cargado en instrument_legs), y en un bono con cupones es la
+    # tasa anual del cupón. Pasarla como `tem` en el segundo caso daría una TEM
+    # del 29,5% mensual. Con cupones no hace falta: el motor descuenta el
+    # calendario, que ya trae cada cupón en pesos.
+    if i.get("tasa_int") is not None and i.get("periodicidad_int") in (None, "Nula"):
+        p["tem"] = _f(i.get("tasa_int"))
+    return [("FIJA", p)]
 
 
 # ════════════════════════════ valuación ════════════════════════════
@@ -768,7 +1288,32 @@ def valuar_simbolo(ctx: Ctx, inst: dict, patas: list, esc: dict, prow: Optional[
     out = []
     for leg, (pata, p) in vals.items():
         ytm = ytm_nat = dur = par = None
-        if precio and precio > 0 and dias_corr > 0:
+        if precio and precio > 0 and pata.flujos:
+            # Bono con cupones: la TIR sale de descontar el vector entero. El
+            # precio entra como flujo negativo en la liquidación, así que el
+            # resultado ya es la TIR del comprador de hoy.
+            #
+            # El vector está en la unidad de `conv` y el precio viene en pesos:
+            # `fx_nativa` es el puente (el MEP de un hard dollar, el A3500 de un
+            # dólar linked, el coeficiente CER vigente de un CER). Dividir el
+            # precio en vez de inflar el vector deja la TIR en la unidad del
+            # bono, que es como la quotea el mercado.
+            futuros = [(d, c) for d, c in pata.flujos if d > fecha_liq]
+            if futuros:
+                precio_nat = _f(_pick(prow, pata.precio_cols)) if pata.precio_cols else None
+                if not precio_nat or precio_nat <= 0:
+                    precio_nat = precio / (pata.fx_nativa or 1.0)
+                ytm_nat = xirr([(fecha_liq, -precio_nat)] + futuros)
+                dur = macaulay(futuros, ytm_nat) if ytm_nat is not None else None
+                # La TIR nominal en pesos de un bono con cupones exigiría
+                # proyectar todo el camino del ajuste pago por pago. Sólo sirve
+                # para comparar patas dentro de un dual y ningún dual amortiza,
+                # así que se reporta la nativa en las dos columnas y `ytm_conv`
+                # dice en qué unidad está.
+                ytm = ytm_nat
+                if pata.vt:
+                    par = precio / pata.vt * 100
+        elif precio and precio > 0 and dias_corr > 0:
             # ytm: NOMINAL en pesos. Es la única comparable entre patas, y la que
             # decide cuál gana.
             ytm = (pata.vpv / precio) ** (365 / dias_corr) - 1
@@ -805,7 +1350,7 @@ def once(args) -> int:
     symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
 
     insts = cargar_instrumentos(symbols)
-    patas = patas_sinteticas(insts) if args.sin_tablas else cargar_patas(symbols)
+    patas = patas_sinteticas(insts) if args.sin_tablas else cargar_patas(insts)
     esc = {} if args.sin_tablas else cargar_escenario(args.scenario)
     precios = cargar_precios(list(patas.keys()) or None)
 
@@ -828,6 +1373,10 @@ def once(args) -> int:
                 ytm = "TIR    s/precio"
             elif x["ytm_conv"] == "nominal_ars":
                 ytm = f"TIR {x['ytm']:7.2%}"
+            elif x["ytm"] == x["ytm_nativa"]:
+                # Bono con cupones: hay una sola TIR y está en su unidad.
+                u = {"real_cer": "real", "usd": "USD"}.get(x["ytm_conv"], x["ytm_conv"])
+                ytm = f"TIR {x['ytm_nativa']:7.2%} {u}"
             else:
                 u = {"real_cer": "real", "usd": "USD"}.get(x["ytm_conv"], x["ytm_conv"])
                 ytm = f"TIR {x['ytm']:7.2%} $ / {x['ytm_nativa']:6.2%} {u}"
@@ -863,13 +1412,16 @@ def once(args) -> int:
         # apagás el motor viejo del mismo universo.
         g = next(r for r in res if r[2]["is_winner"])
         head = {"symbol": sym, "vpv": _r(g[1].vpv, 4), "ts": ts}
-        if g[2]["ytm"] is not None:
+        # ytm_ars es por definición nominal en pesos. En un bono con cupones la
+        # TIR sale en la unidad del vector —real sobre CER, dólares— y ponerla
+        # acá haría pasar un 5,8% real por un 5,8% nominal.
+        if g[2]["ytm"] is not None and g[2]["ytm_conv"] == "nominal_ars":
             head["ytm_ars"] = _r(g[2]["ytm"], 6)
 
         if dual or args.headline_all:
             if g[2]["ytm"] is not None:
                 head["ytm"] = _r(g[2]["ytm"], 6)
-                head["ytm_tipo"] = "nominal_ars"
+                head["ytm_tipo"] = g[2]["ytm_conv"]
                 head["duration_y"] = _r(g[2]["duration_y"], 6)
             if g[2]["paridad"] is not None:
                 head["paridad"] = _r(g[2]["paridad"], 4)
@@ -902,7 +1454,7 @@ def check(args):
     ctx = ctx_de(args)
     symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
     insts = cargar_instrumentos(symbols)
-    patas = patas_sinteticas(insts) if args.sin_tablas else cargar_patas(symbols)
+    patas = patas_sinteticas(insts) if args.sin_tablas else cargar_patas(insts)
     esc = {} if args.sin_tablas else cargar_escenario(args.scenario)
     precios = cargar_precios()
 
@@ -938,7 +1490,7 @@ def main():
     ap.add_argument("--symbols", help="lista separada por comas")
     ap.add_argument("--scenario", default="base")
     ap.add_argument("--sin-tablas", action="store_true",
-                    help="deriva las patas de instruments_v2 en vez de instrument_legs")
+                    help="ignora instrument_legs: deduce las patas de la ficha")
     ap.add_argument("--headline-all", action="store_true",
                     help="escribe el headline en prices también para bonos de una pata "
                          "(por default sólo duales, para no pisar a tir.py/cerv2.py)")
