@@ -221,15 +221,20 @@ def xirr(flujos, guess: float = 0.10) -> Optional[float]:
     return 0.5 * (lo + hi)
 
 
-def macaulay(flujos, r: float) -> Optional[float]:
-    """Duration de Macaulay en años sobre los flujos FUTUROS (sin el precio)."""
+def macaulay(flujos, r: float, desde: date) -> Optional[float]:
+    """Duration de Macaulay en años sobre los flujos FUTUROS (sin el precio).
+
+    `desde` es la LIQUIDACIÓN, y es obligatoria: tomar como origen el primer
+    flujo del vector —que es lo intuitivo— mide los plazos desde el próximo
+    cupón y no desde hoy. A un bono de un solo pago le daba duration 0, y a DICP
+    le restaba los 91 días que faltan para el cupón que viene.
+    """
     if r is None or r <= -0.9999 or not flujos:
         return None
-    d0 = min(d for d, _ in flujos)
-    pv = sum(c / (1 + r) ** _yf(d0, d) for d, c in flujos)
+    pv = sum(c / (1 + r) ** _yf(desde, d) for d, c in flujos)
     if pv <= 0:
         return None
-    return sum(_yf(d0, d) * (c / (1 + r) ** _yf(d0, d)) for d, c in flujos) / pv
+    return sum(_yf(desde, d) * (c / (1 + r) ** _yf(desde, d)) for d, c in flujos) / pv
 
 
 def tamar_tem(tna: float, margen: float = 0.0) -> float:
@@ -299,6 +304,7 @@ class Ctx:
         self.hoy = hoy
         self._feriados = None
         self._tamar = None
+        self._badlar = None
         self._cer = None
         self._rem = {}
         self._fx = None
@@ -374,6 +380,16 @@ class Ctx:
         if self._tamar is None:
             self._tamar = {f: v / 100 for f, v in cargar_serie("tamar_tna").items()}
         return self._tamar
+
+    @property
+    def badlar(self) -> dict:
+        """{date: TNA decimal}. Igual que la TAMAR, en `series` va cruda en %.
+        Es la BADLAR de bancos privados en pesos, TNA (id 7 del BCRA), que es la
+        que citan los prospectos; el BCRA publica además la efectiva anual y una
+        variante que mete a los bancos públicos."""
+        if self._badlar is None:
+            self._badlar = {f: v / 100 for f, v in cargar_serie("badlar").items()}
+        return self._badlar
 
     @property
     def cer(self) -> dict:
@@ -628,24 +644,28 @@ def motor_fija(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
     )
 
 
-def _tamar_tna_futura(ctx: Ctx, esc: dict, driver) -> tuple:
-    """TNA con la que se proyecta el tramo de TAMAR que todavía no se publicó."""
+def _tna_futura(ctx: Ctx, serie: dict, clave: str, esc: dict, driver) -> tuple:
+    """TNA con la que se proyecta el tramo de la serie que todavía no se publicó."""
     if driver is not None:
         return float(driver), "driver"
-    if esc.get("tamar_tna") is not None:
-        return float(esc["tamar_tna"]), "escenario"
-    recientes = sorted(d for d in ctx.tamar if d <= ctx.hoy)[-N_PROY:]
+    if esc.get(clave) is not None:
+        return float(esc[clave]), "escenario"
+    recientes = sorted(d for d in serie if d <= ctx.hoy)[-N_PROY:]
     if not recientes:
-        raise ValueError("sin TAMAR observada")
-    return sum(ctx.tamar[d] for d in recientes) / len(recientes), f"prom. últimos {N_PROY}"
+        raise ValueError(f"sin {clave} observada")
+    return sum(serie[d] for d in recientes) / len(recientes), f"prom. últimos {N_PROY}"
 
 
-def _tamar_con_cupones(ctx: Ctx, inst: dict, cal, margen: float, base: float,
-                       esc: dict, driver) -> Pata:
-    """TAMAR que amortiza o paga renta antes del vencimiento.
+def _tamar_tna_futura(ctx: Ctx, esc: dict, driver) -> tuple:
+    return _tna_futura(ctx, ctx.tamar, "tamar_tna", esc, driver)
+
+
+def _flotante_con_cupones(ctx: Ctx, inst: dict, cal, serie: dict, margen: float,
+                          base: float, tna_fut: float, origen: str) -> Pata:
+    """Bono a tasa variable que amortiza o paga renta antes del vencimiento.
 
     Acá no hay una sola ventana: cada cupón tiene la suya, [inicio-10h ; pago-10h],
-    y el bullet de motor_tamar no sirve. El cupón del período EN CURSO ya está
+    y la forma cerrada del bullet no sirve. El cupón del período EN CURSO ya está
     fijado —se determinó al arrancar el período— así que se toma el `interes` del
     calendario tal cual. Los períodos que todavía no empezaron se recalculan con
     la serie y, para el tramo sin publicar, con la TNA proyectada.
@@ -653,9 +673,11 @@ def _tamar_con_cupones(ctx: Ctx, inst: dict, cal, margen: float, base: float,
     El devengamiento es TNA · días/365 sobre el capital residual, que es la
     convención con la que el cargador armó el calendario (se verificó contra el
     `interes` de los cupones ya fijados).
+
+    Sirve igual para TAMAR y para BADLAR: lo único que cambia es la serie y de
+    dónde sale la TNA proyectada.
     """
     futuros, vn_res, dev = cal
-    tna_fut, origen = _tamar_tna_futura(ctx, esc, driver)
     porf = {f.fecha: f for f in (ctx.flujos.get(inst["symbol"]) or [])}
 
     # Capital residual durante cada período: el que todavía no amortizó, contando
@@ -677,7 +699,7 @@ def _tamar_con_cupones(ctx: Ctx, inst: dict, cal, margen: float, base: float,
             continue
         ventana = ctx.rango_habiles(ctx.habil_anterior(ini, 10),
                                     ctx.habil_anterior(f_, 10))
-        obs = [ctx.tamar[d] for d in ventana if d in ctx.tamar and d <= ctx.hoy]
+        obs = [serie[d] for d in ventana if d in serie and d <= ctx.hoy]
         n_f = sum(1 for d in ventana if d > ctx.hoy)
         n_t = len(obs) + n_f
         tna = ((sum(obs) + tna_fut * n_f) / n_t) if n_t else tna_fut
@@ -692,7 +714,7 @@ def _tamar_con_cupones(ctx: Ctx, inst: dict, cal, margen: float, base: float,
         vt=(vn_res + dev) * k,
         conv="nominal_ars", flujos=[(d, c * k) for d, c in vector],
         params={"n_pagos": len(vector), "cupones_fijados": n_fijos,
-                "cupones_proyectados": n_proy, "tamar_proy": round(tna_fut, 8),
+                "cupones_proyectados": n_proy, "tna_proy": round(tna_fut, 8),
                 "margen": round(margen, 8), "vn_residual": round(vn_res, 6),
                 "devengado": round(dev, 6), "base": round(base, 6),
                 "origen_proy": origen},
@@ -728,7 +750,9 @@ def motor_tamar(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
         # por bono.
         base = cal[1] or base
     if cal and not es_bullet(cal, vto, base):
-        return _tamar_con_cupones(ctx, inst, cal, margen, base, esc, driver)
+        tna_fut, origen = _tamar_tna_futura(ctx, esc, driver)
+        return _flotante_con_cupones(ctx, inst, cal, serie, margen, base,
+                                     tna_fut, origen)
 
     ventana = ctx.rango_habiles(ctx.habil_anterior(emi, 10), ctx.habil_anterior(vto, 10))
     if not ventana:
@@ -1060,32 +1084,27 @@ def motor_hd(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
 
 
 def motor_badlar(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
-    """BADLAR privados + margen, sobre el calendario del bono.
+    """BADLAR de bancos privados + margen, sobre el calendario del bono.
 
-    A diferencia de TAMAR, la serie de BADLAR todavía no está en `series`
-    (series_sync.py trae cer, tamar_tna, a3500 e ipc_mensual), así que el cupón
-    no se puede recalcular acá: se usa el `interes` que ya tiene el calendario,
-    que el cargador dejó con la BADLAR del día de la carga sostenida plana.
+    Misma mecánica que TAMAR: cada cupón se arma con el promedio de la serie en
+    su propia ventana, el del período en curso ya está fijado y el tramo sin
+    publicar se proyecta. La serie es la TNA de bancos privados en pesos (id 7
+    del BCRA); el BCRA publica además la efectiva anual y una variante con
+    bancos públicos, que no son las del prospecto.
 
-    Eso vale para el cupón corriente —que ya está fijado— y es una proyección
-    para los siguientes. Queda marcado en params para que se vea de dónde sale
-    el número; cuando la serie entre al sync, este motor pasa a calcular los
-    cupones futuros como lo hace motor_tamar y el resto no cambia.
+    No tiene rama bullet: todo lo que paga BADLAR en la base amortiza o paga
+    renta. Si algún día entra un bullet, hay que sumarle la forma cerrada como
+    tiene motor_tamar.
     """
     cal = calendario(ctx, inst["symbol"], ctx.fecha_liq)
     if not cal:
         raise ValueError("sin calendario de pagos")
-    futuros, vn_res, dev = cal
-    return Pata(
-        vpv=sum(c for _d, c in futuros),
-        tem=None, driver=None,
-        vt=vn_res + dev,
-        conv="nominal_ars", flujos=futuros,
-        params={"n_pagos": len(futuros), "vn_residual": round(vn_res, 6),
-                "devengado": round(dev, 6),
-                "margen": _f(inst.get("margen_ref")),
-                "origen_cupon": "calendario (BADLAR plana, sin serie en `series`)"},
-    )
+    margen = _f(p.get("margen"))
+    if margen is None:
+        margen = _f(inst.get("margen_ref"), 0.0) or 0.0
+    tna_fut, origen = _tna_futura(ctx, ctx.badlar, "badlar_tna", esc, driver)
+    return _flotante_con_cupones(ctx, inst, cal, ctx.badlar, margen, 100.0,
+                                 tna_fut, origen)
 
 
 MOTORES: dict[str, Callable[..., Pata]] = {
@@ -1102,7 +1121,8 @@ DRIVER_BOUNDS: dict[str, tuple] = {
     # TNA de depósitos: no puede ser negativa. Con el piso en -0.99 la bisección
     # devolvía breakevens imposibles (-85,7% para TTS26) en vez de decir que la
     # opción ya está definida y no hay TAMAR futura que la dé vuelta.
-    "TAMAR": (0.0, 3.0),        # TNA decimal
+    "TAMAR":  (0.0, 3.0),       # TNA decimal
+    "BADLAR": (0.0, 3.0),       # TNA decimal
     "CER":   (-0.50, 5.0),      # inflación mensual decimal
     "DLK":   (1.0, 1_000_000),  # A3500 al vencimiento
 }
@@ -1169,7 +1189,7 @@ def cargar_escenario(sid: str) -> dict:
     return ((res.data or [{}])[0].get("supuestos")) or {}
 
 
-def cargar_patas(insts: dict) -> dict:
+def cargar_patas(insts: dict, fallback: bool = True) -> dict:
     """{symbol: [(leg, params), ...]}: instrument_legs manda, y lo que no está
     ahí se deduce de la estructura de pagos del bono.
 
@@ -1179,6 +1199,11 @@ def cargar_patas(insts: dict) -> dict:
     escala y, peor, deja sin valuar a cada bono nuevo hasta que alguien se
     acuerde de insertarle las patas. Con el fallback, un instrumento nuevo entra
     valuado el mismo día que se carga.
+
+    `fallback=False` devuelve sólo lo cargado en la tabla. Lo usa valuar_loop,
+    que durante la rueda ya resuelve el resto del universo con su propio
+    descuento de flujos: deducir patas ahí le multiplicaría por diez el trabajo
+    de cada ciclo para reescribir lo mismo.
     """
     q = sb.table("instrument_legs").select("symbol, leg, params")
     if insts:
@@ -1186,9 +1211,10 @@ def cargar_patas(insts: dict) -> dict:
     out = {}
     for r in (q.execute().data or []):
         out.setdefault(r["symbol"], []).append((r["leg"], r.get("params") or {}))
-    for sym, i in insts.items():
-        if sym not in out:
-            out[sym] = patas_por_estructura(i)
+    if fallback:
+        for sym, i in insts.items():
+            if sym not in out:
+                out[sym] = patas_por_estructura(i)
     return out
 
 
@@ -1239,7 +1265,7 @@ def patas_por_estructura(i: dict) -> list:
     if ref == "A3500":
         return [("DLK", {})]
     if ref == "Badlar":
-        return [("BADLAR", {})]
+        return [("BADLAR", {"margen": margen})]
 
     # Sin ajuste de capital: decide la moneda en la que paga.
     if i.get("moneda_pago") == "USD":
@@ -1304,7 +1330,7 @@ def valuar_simbolo(ctx: Ctx, inst: dict, patas: list, esc: dict, prow: Optional[
                 if not precio_nat or precio_nat <= 0:
                     precio_nat = precio / (pata.fx_nativa or 1.0)
                 ytm_nat = xirr([(fecha_liq, -precio_nat)] + futuros)
-                dur = macaulay(futuros, ytm_nat) if ytm_nat is not None else None
+                dur = macaulay(futuros, ytm_nat, fecha_liq) if ytm_nat is not None else None
                 # La TIR nominal en pesos de un bono con cupones exigiría
                 # proyectar todo el camino del ajuste pago por pago. Sólo sirve
                 # para comparar patas dentro de un dual y ningún dual amortiza,
@@ -1412,15 +1438,25 @@ def once(args) -> int:
         # apagás el motor viejo del mismo universo.
         g = next(r for r in res if r[2]["is_winner"])
         head = {"symbol": sym, "vpv": _r(g[1].vpv, 4), "ts": ts}
-        # ytm_ars es por definición nominal en pesos. En un bono con cupones la
-        # TIR sale en la unidad del vector —real sobre CER, dólares— y ponerla
-        # acá haría pasar un 5,8% real por un 5,8% nominal.
-        if g[2]["ytm"] is not None and g[2]["ytm_conv"] == "nominal_ars":
+        # ytm_ars es por definición nominal en pesos. En un bullet `ytm` ya es
+        # esa, porque el motor proyecta el ajuste hasta el vencimiento. En un
+        # bono con cupones la TIR sale en la unidad del vector —real sobre CER,
+        # dólares— y ponerla acá haría pasar un 5,8% real por un 5,8% nominal;
+        # proyectar el ajuste pago por pago para esos no está hecho, así que la
+        # columna queda vacía en vez de mentir.
+        if g[2]["ytm"] is not None and (g[1].flujos is None
+                                        or g[2]["ytm_conv"] == "nominal_ars"):
             head["ytm_ars"] = _r(g[2]["ytm"], 6)
 
         if dual or args.headline_all:
-            if g[2]["ytm"] is not None:
-                head["ytm"] = _r(g[2]["ytm"], 6)
+            # `ytm` va en la convención NATIVA del bono, que es la que escriben
+            # los motores viejos y la que espera el front: un CER se quotea en
+            # tasa real y un hard dollar en dólares. Poner acá la nominal en
+            # pesos con la etiqueta del nativo es justo el error que esta
+            # columna no perdona: un 3,91% real pasaría por un 29,55% nominal
+            # sin que se note. La nominal vive en ytm_ars.
+            if g[2]["ytm_nativa"] is not None:
+                head["ytm"] = _r(g[2]["ytm_nativa"], 6)
                 head["ytm_tipo"] = g[2]["ytm_conv"]
                 head["duration_y"] = _r(g[2]["duration_y"], 6)
             if g[2]["paridad"] is not None:

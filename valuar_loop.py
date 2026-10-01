@@ -129,7 +129,11 @@ class Referencia:
         t0 = time.monotonic()
         self.ctx = P.Ctx(self.hoy or date.today())
         self.insts = P.cargar_instrumentos()
-        self.patas = P.cargar_patas()
+        # Sin fallback por estructura: acá sólo se valúan los bonos con patas
+        # cargadas a mano (los duales). El resto del universo lo cubre más abajo
+        # tir_y_duracion con su propio descuento de flujos, que es lo que hace
+        # que este bucle pueda correr cada pocos segundos.
+        self.patas = P.cargar_patas(self.insts, fallback=False)
         self.esc = P.cargar_escenario(self.escenario)
         # Forzar las cachés perezosas ahora y no en el primer ciclo, para que el
         # costo no aparezca disfrazado de latencia de valuación.
@@ -294,8 +298,13 @@ def ciclo(ref: Referencia, previos: dict, args) -> tuple:
         if g[2]["ytm"] is not None:
             head["ytm_ars"] = P._r(g[2]["ytm"], 6)
             if dual:
-                head["ytm"] = P._r(g[2]["ytm"], 6)
-                head["ytm_tipo"] = "nominal_ars"
+                # Misma regla que patas.py: en `ytm` va la TIR en la convención
+                # del bono y en `ytm_tipo` esa convención. Hoy la ganadora de
+                # todos los duales es la TAMAR, que ya es nominal en pesos, pero
+                # dejarlo atado a la pata evita que un dual nuevo escriba una
+                # tasa real con la etiqueta equivocada.
+                head["ytm"] = P._r(g[2]["ytm_nativa"], 6)
+                head["ytm_tipo"] = g[2]["ytm_conv"]
                 head["duration_y"] = P._r(g[2]["duration_y"], 6)
         if dual and g[2]["paridad"] is not None:
             head["paridad"] = P._r(g[2]["paridad"], 4)

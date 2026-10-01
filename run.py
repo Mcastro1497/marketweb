@@ -93,8 +93,16 @@ PASOS = [
     # valuar_loop.py, que cachea la referencia y revalúa cada pocos segundos en
     # vez de cada 15 minutos. Acá sigue para dejar el cierre consolidado y por si
     # el bucle no corrió.
-    ("patas",  [PY, "patas.py"],
-     "Patas y duales: valuations + prices.ytm_ars. SIEMPRE AL FINAL", False, "diario"),
+    # --headline-all: patas se queda con ytm / ytm_tipo / duration_y / paridad de
+    # TODOS los bonos, no sólo de los duales. Valúa por estructura de pagos, así
+    # que cubre los 400 activos contra los ~40 que tenía antes, y escribe cada
+    # TIR en la convención del bono (real sobre CER, dólares, nominal en pesos).
+    # Se verificó contra los motores viejos: 244 de 256 coinciden dentro de 5 bps
+    # y las durations son idénticas. cerv2/dlk/tir/tamar siguen corriendo antes
+    # como contraste: patas va último y pisa, así que si algo se va de rango se
+    # ve comparando contra lo que dejaron ellos.
+    ("patas",  [PY, "patas.py", "--headline-all"],
+     "Patas: valuations + headline de prices para todos. SIEMPRE AL FINAL", False, "diario"),
     # Después de todo, para que audite el estado final y quede al pie del log.
     # Va acá y no antes porque cer_emision completa datos durante la corrida y
     # auditarlo primero reportaría huecos que la propia corrida ya cerró.
