@@ -1136,6 +1136,16 @@ MOTORES: dict[str, Callable[..., Pata]] = {
     "DLK":   motor_dlk,
 }
 
+# Cómo se llama el driver de cada pata en el escenario. `leg_types` espeja esto,
+# y lo que NO está acá es una pata sin driver: determinística, siempre el lado
+# 'target' del breakeven.
+DRIVER_NOMBRE: dict[str, str] = {
+    "TAMAR":  "tamar_tna",
+    "BADLAR": "badlar_tna",
+    "CER":    "infl_mens",
+    "DLK":    "fx_vto",
+}
+
 # Rango de bisección del driver de cada pata, en sus propias unidades.
 DRIVER_BOUNDS: dict[str, tuple] = {
     # TNA de depósitos: no puede ser negativa. Con el piso en -0.99 la bisección
@@ -1252,6 +1262,39 @@ def cargar_patas(insts: dict, solo_manuales: bool = False) -> dict:
     for sym, i in insts.items():
         out[sym] = tabla[sym] if sym in manual else patas_por_estructura(i)
     return out
+
+
+def sincronizar_leg_types() -> int:
+    """Da de alta en `leg_types` los tipos de pata que tiene MOTORES.
+
+    `instrument_legs.leg` referencia esa tabla, así que un motor nuevo no puede
+    escribir ni una pata hasta que su tipo exista. Antes eso era un INSERT a mano
+    que nadie recordaba —HD y BADLAR hicieron rebotar la primera corrida— y ahora
+    sale de MOTORES, que ya es la lista de la verdad.
+
+    Sólo da de alta lo que falta. Las descripciones ya cargadas están escritas a
+    mano y no se pisan; si el `driver` de una existente no coincide con el código
+    se avisa y no se toca, porque eso no es un alta que falte sino una
+    contradicción que alguien tiene que mirar.
+    """
+    actuales = {r["leg"]: r for r in
+                (sb.table("leg_types").select("leg, descripcion, driver").execute().data or [])}
+    filas = []
+    for leg, fn in MOTORES.items():
+        esperado = DRIVER_NOMBRE.get(leg)
+        if leg in actuales:
+            if (actuales[leg].get("driver") or None) != esperado:
+                print(f"[LEGS] ojo: leg_types.{leg}.driver = "
+                      f"{actuales[leg].get('driver')!r} y el código espera {esperado!r}")
+            continue
+        doc = (fn.__doc__ or "").strip().splitlines()
+        filas.append({"leg": leg,
+                      "descripcion": (doc[0].strip() if doc else leg)[:200],
+                      "driver": esperado})
+    if filas:
+        sb.table("leg_types").insert(filas).execute()
+        print(f"[LEGS] alta en leg_types: {', '.join(f['leg'] for f in filas)}")
+    return len(filas)
 
 
 def sincronizar_patas(insts: dict, patas: dict) -> tuple:
@@ -1462,6 +1505,7 @@ def once(args) -> int:
     # se sincroniza, porque el borrado de sobrantes sólo puede decidirse viendo el
     # universo completo.
     if not args.dry_run and not args.sin_tablas and not symbols:
+        sincronizar_leg_types()
         altas, bajas = sincronizar_patas(insts, patas)
         if altas or bajas:
             print(f"[LEGS] {altas} patas deducidas escritas, {bajas} sobrantes borradas")
