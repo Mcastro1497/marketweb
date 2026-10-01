@@ -83,6 +83,14 @@ POSIBLES_PRECIO = ["price_ars", "closing_price", "price", "last", "px", "ultimo"
 
 
 # ════════════════════════════ contrato ════════════════════════════
+class Calendario(NamedTuple):
+    """Lo que queda por cobrar de un bono. Ver `calendario()`."""
+    futuros:   list              # [(fecha, monto)], montos sin ajuste
+    residual:  float             # capital que falta amortizar
+    devengado: float             # interés corrido del cupón en curso
+    dias_prox: Optional[int]     # plazo del cupón en curso, del calendario
+
+
 class Flujo(NamedTuple):
     """Una fila de instrument_flows. Los montos van SIN AJUSTE, por cada 100 de
     nominal ORIGINAL: en un CER el capital figura como 20, no como 20 por el
@@ -581,28 +589,40 @@ def calendario(ctx: Ctx, sym: str, desde: date):
     if prox is not None and prox.interes and prox.dias:
         corridos = prox.dias - (prox.fecha - desde).days
         devengado = prox.interes * min(1.0, max(0.0, corridos / prox.dias))
-    return futuros, vn_res, devengado
+    return Calendario(futuros, vn_res, devengado,
+                      prox.dias if prox is not None else None)
 
 
-def es_bullet(cal, vto: date, capital: float = 100.0) -> bool:
-    """Un único pago, al vencimiento, por el capital ENTERO. Para estos el camino
-    cerrado del motor es MEJOR que descontar el vector: proyecta el ajuste a la
-    fecha de pago y deja un `driver` despejable, que es lo que necesita el
-    breakeven de un dual.
+def es_bullet(cal: Calendario, inst: dict, capital: float = 100.0) -> bool:
+    """¿Vale la forma cerrada para este bono?
 
-    El `capital` importa: la forma cerrada arranca de 100 de nominal y capitaliza
-    desde la emisión, así que no vale para un bono que ya amortizó. A TX26 le
-    queda un solo pago al vencimiento pero de 20 de capital —amortizó el 80%— y
-    valuarlo como bullet lo multiplicaba por cinco.
+    Sólo si capitaliza TODO desde la emisión y paga una vez al vencimiento. La
+    forma cerrada hace 100·(1+tasa)^(vida entera), y eso exige tres cosas:
 
-    Se pide capital >= 100 y no == 100 a propósito: si falta capital el bono
-    amortizó y manda el calendario, pero si SOBRA es que el calendario está en
-    otra unidad —TMVE8 trae el nominal en dólares ya pasado al tipo de cambio
-    inicial, 149.983 por cada 100— y ahí la forma cerrada sigue siendo la buena.
+      1. un único pago pendiente, al vencimiento;
+      2. el capital entero sin amortizar. A TX26 le queda un solo pago pero de 20
+         de capital —amortizó el 80%— y valuarlo así lo multiplicaba por cinco.
+         Se pide capital >= 100 y no == 100 porque si SOBRA es que el calendario
+         está en otra unidad: TMVE8 trae el nominal en dólares ya pasado al tipo
+         de cambio inicial, 149.983 por cada 100, y ahí la cerrada sigue valiendo;
+      3. que ese pago devengue desde la EMISIÓN. Un bono de renta trimestral al
+         que le queda el último cupón cumple 1 y 2, pero los cupones anteriores
+         los PAGÓ en vez de capitalizarlos: capitalizar la vida entera le inventa
+         plata que ya salió del bono. A RC3CO le daba un valor técnico de 125,63
+         contra un precio de 101 y una TIR del 292%.
+
+    La condición 3 sale del `dias` del cupón, no de la ficha: es el plazo con el
+    que se calculó ese pago, así que si cubre la vida del bono es porque no hubo
+    pagos antes.
     """
-    futuros, vn_res, _dev = cal
-    return (len(futuros) == 1 and futuros[0][0] >= vto
-            and vn_res >= capital - 1e-6)
+    if len(cal.futuros) != 1 or cal.futuros[0][0] < inst["_vencimiento"]:
+        return False
+    if cal.residual < capital - 1e-6:
+        return False
+    vida = (inst["_vencimiento"] - inst["_emision"]).days
+    if cal.dias_prox is None:
+        return vida <= 0
+    return cal.dias_prox >= vida * 0.95
 
 
 def motor_fija(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
@@ -621,8 +641,8 @@ def motor_fija(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
     # capitaliza desde la emisión y paga todo junto. Sin `tem` —un bono que paga
     # renta, o una letra a descuento como LBN26— el calendario es el único
     # camino, y además es exacto: los montos en pesos están escritos.
-    if cal and not (p.get("tem") is not None and es_bullet(cal, vto, base)):
-        futuros, vn_res, dev = cal
+    if cal and not (p.get("tem") is not None and es_bullet(cal, inst, base)):
+        futuros, vn_res, dev = cal.futuros, cal.residual, cal.devengado
         return Pata(
             vpv=sum(c for _d, c in futuros) * (base / 100),
             tem=_f(p.get("tem")), driver=None,
@@ -677,7 +697,7 @@ def _flotante_con_cupones(ctx: Ctx, inst: dict, cal, serie: dict, margen: float,
     Sirve igual para TAMAR y para BADLAR: lo único que cambia es la serie y de
     dónde sale la TNA proyectada.
     """
-    futuros, vn_res, dev = cal
+    futuros, vn_res, dev = cal.futuros, cal.residual, cal.devengado
     porf = {f.fecha: f for f in (ctx.flujos.get(inst["symbol"]) or [])}
 
     # Capital residual durante cada período: el que todavía no amortizó, contando
@@ -743,13 +763,13 @@ def motor_tamar(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
     serie = ctx.tamar
 
     cal = calendario(ctx, inst["symbol"], ctx.fecha_liq)
-    if cal and p.get("fx_base") is None and len(cal[0]) == 1 and cal[0][0][0] >= vto:
+    if cal and p.get("fx_base") is None and len(cal.futuros) == 1 and cal.futuros[0][0] >= vto:
         # Bullet con nominal en dólares (TMVE8): el capital del calendario ya
         # viene convertido al tipo de cambio inicial, así que ESE es el 100 de
         # esta pata. Deducirlo de acá evita tener que cargar el fx_base a mano
         # por bono.
-        base = cal[1] or base
-    if cal and not es_bullet(cal, vto, base):
+        base = cal.residual or base
+    if cal and not es_bullet(cal, inst, base):
         tna_fut, origen = _tamar_tna_futura(ctx, esc, driver)
         return _flotante_con_cupones(ctx, inst, cal, serie, margen, base,
                                      tna_fut, origen)
@@ -884,7 +904,7 @@ def motor_cer(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
     cer_apl = ctx.cer_en(min(f_apl_cer, ult_obs))
 
     cal = calendario(ctx, inst["symbol"], ctx.fecha_liq)
-    if cal and not es_bullet(cal, vto):
+    if cal and not es_bullet(cal, inst):
         # Bono CER que amortiza o paga renta. Los montos del calendario están
         # SIN ajustar, o sea expresados en pesos de la base CER del bono: eso es
         # exactamente la unidad en la que se quotea un CER, y descontarlos
@@ -893,7 +913,7 @@ def motor_cer(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
         #
         # El VPV nominal sí necesita proyección: cada pago se multiplica por el
         # CER estimado a su propia fecha de aplicación, no por el del último.
-        futuros, vn_res, dev = cal
+        futuros, vn_res, dev = cal.futuros, cal.residual, cal.devengado
         # La senda de proyección se arma acá y no se reusa la del tramo bullet:
         # si el vencimiento ya tiene CER publicado, ese tramo no la calcula, pero
         # un bono con cupones igual puede tener pagos más allá del último dato.
@@ -995,13 +1015,13 @@ def motor_dlk(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
     fx_spot = ctx.fx_spot
 
     cal = calendario(ctx, inst["symbol"], ctx.fecha_liq)
-    if cal and not es_bullet(cal, vto):
+    if cal and not es_bullet(cal, inst):
         # Dólar linked que amortiza o paga renta. Los montos del calendario son
         # el nominal en dólares de cada pago; se liquidan en pesos al A3500, no
         # al MEP. Descontarlos contra el precio pasado a dólares al A3500 da la
         # TIR en dólares, que es la convención del mercado para estos bonos y no
         # necesita proyectar devaluación.
-        futuros, vn_res, dev = cal
+        futuros, vn_res, dev = cal.futuros, cal.residual, cal.devengado
         return Pata(
             vpv=sum(c for _d, c in futuros) * fx_spot,
             tem=None, driver=None,
@@ -1069,7 +1089,7 @@ def motor_hd(ctx: Ctx, inst: dict, p: dict, esc: dict, driver=None) -> Pata:
     cal = calendario(ctx, inst["symbol"], ctx.fecha_liq)
     if not cal:
         raise ValueError("sin calendario de pagos")
-    futuros, vn_res, dev = cal
+    futuros, vn_res, dev = cal.futuros, cal.residual, cal.devengado
     fx = _f(esc.get("fx_mep")) or ctx.fx_mep
     return Pata(
         vpv=sum(c for _d, c in futuros) * fx,
@@ -1510,6 +1530,16 @@ def check(args):
         pata = next(p for lg, p, _ in res if lg == "TAMAR")
         x = next(e for lg, _, e in res if lg == "TAMAR")
         t0, v0, y0 = _f(prow["tem_total"]), _f(prow.get("vpv")), _f(prow.get("ytm"))
+        if pata.tem is None:
+            # Pata que fue por el calendario: no hay una TEM única que comparar,
+            # porque cada cupón tiene su propia ventana de TAMAR. tamar.py le
+            # inventa una capitalizando desde la emisión, y es justo el número
+            # que no sirve para estos bonos.
+            print(f"{sym:8} {'(cupones)':>10} {t0:>11.4%} {'':>7} "
+                  f"{pata.vpv:>10.2f} {v0 if v0 else float('nan'):>11.2f} {'':>7} "
+                  f"{x['ytm_nativa'] if x['ytm_nativa'] else float('nan'):>10.2%} "
+                  f"{y0 if y0 else float('nan'):>11.2%}")
+            continue
         d_tem = (pata.tem - t0) * 10000
         d_vpv = (pata.vpv / v0 - 1) * 100 if v0 else float("nan")
         print(f"{sym:8} {pata.tem:>10.4%} {t0:>11.4%} {d_tem:>7.1f} "
