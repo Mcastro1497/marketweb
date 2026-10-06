@@ -110,14 +110,17 @@ def macaulay(cfs_pos, r):
 # ── IO Supabase ───────────────────────────────────────────
 def load_instruments_and_prices():
     rows = sb.table("instruments") \
-             .select("symbol, instrument_type, referencias") \
+             .select("symbol, instrument_type, referencias, moneda_pago") \
              .eq("is_active", True) \
              .in_("instrument_type", ["ON","HD"]) \
              .execute().data or []
-    # Una ON dólar linked paga al A3500, no al MEP: dolarizarla con el MEP como
-    # a un hard dollar le inflaba la TIR (TLCKO daba 13% con la paridad sobre
-    # 100). Esas las valúa dlk.py.
-    rows = [r for r in rows if r.get("referencias") != "A3500"]
+    # Sólo hard dollar: sin ajuste de capital y pagando en dólares. Una ON
+    # dólar linked paga al A3500, no al MEP (TLCKO daba 13% con la paridad sobre
+    # 100; la valúa dlk.py). Una ON TAMAR o en pesos fija tiene flujos en pesos:
+    # descontarlos contra el precio dolarizado daba TIR de 10^15 (RC4CO). Esas
+    # las cubre patas.py.
+    rows = [r for r in rows
+            if not r.get("referencias") and r.get("moneda_pago") == "USD"]
     symbols = [r["symbol"] for r in rows]
     prices  = sb.table("prices").select("symbol, last, price_ars_usd").execute().data or []
 

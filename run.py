@@ -101,8 +101,11 @@ PASOS = [
     # y las durations son idénticas. cerv2/dlk/tir/tamar siguen corriendo antes
     # como contraste: patas va último y pisa, así que si algo se va de rango se
     # ve comparando contra lo que dejaron ellos.
+    # Va también en "rueda": si no, entre cierre y cierre manda lo que dejan
+    # tamar.py y tir.py, que valúan los TAMAR con cupones como si capitalizaran
+    # desde la emisión (T661O 378%, PMD26 2071%). Corriendo último, los pisa.
     ("patas",  [PY, "patas.py", "--headline-all"],
-     "Patas: valuations + headline de prices para todos. SIEMPRE AL FINAL", False, "diario"),
+     "Patas: valuations + headline de prices para todos. SIEMPRE AL FINAL", False, "rueda"),
     # Después de todo, para que audite el estado final y quede al pie del log.
     # Va acá y no antes porque cer_emision completa datos durante la corrida y
     # auditarlo primero reportaría huecos que la propia corrida ya cerró.
