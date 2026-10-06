@@ -201,11 +201,12 @@ def macaulay(cfs_pos, r):
 
 # ── IO Supabase ───────────────────────────────────────────
 def load_dlk_instruments_and_prices():
-    """Trae solo instrumentos DLK activos + sus precios en ARS."""
+    """Trae los dólar linked activos + sus precios en ARS: los soberanos (DLK) y
+    las ONs con capital atado al A3500, que pagan igual."""
     rows = sb.table("instruments") \
              .select("symbol, instrument_type") \
              .eq("is_active", True) \
-             .eq("instrument_type", "DLK") \
+             .or_("instrument_type.eq.DLK,referencias.eq.A3500") \
              .execute().data or []
     symbols = [r["symbol"] for r in rows]
     if not symbols:
