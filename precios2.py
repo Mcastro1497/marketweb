@@ -103,7 +103,8 @@ def pick_symbol(by_ticker, tk, seg):
             or candidates[0])
 
 # ── Upsert ────────────────────────────────────────────────
-def upsert_price(symbol, last, bid, ask, price_ars, fx_mep, closing_price, change_pct, price_ars_usd):
+def upsert_price(symbol, last, bid, ask, price_ars, fx_mep, closing_price, change_pct, price_ars_usd,
+                 last_trade_at=None):
     """Escribe SOLO los campos que llegaron con valor.
 
     Un upsert de PostgREST actualiza únicamente las columnas presentes en el
@@ -115,7 +116,7 @@ def upsert_price(symbol, last, bid, ask, price_ars, fx_mep, closing_price, chang
     for col, val in (("last", last), ("bid", bid), ("ask", ask),
                      ("price_ars", price_ars), ("fx_mep", fx_mep),
                      ("closing_price", closing_price), ("change_pct", change_pct),
-                     ("price_ars_usd", price_ars_usd)):
+                     ("price_ars_usd", price_ars_usd), ("last_trade_at", last_trade_at)):
         if val is not None:
             fila[col] = val
     sb.table(PRICES_TABLE).upsert(fila).execute()
@@ -138,6 +139,10 @@ def market_data_handler(msg: dict):
     full = (msg.get("instrumentId") or {}).get("symbol")
     md   = msg.get("marketData") or {}
     last = (md.get("LA") or {}).get("price")
+    # Hora del último trade, en ms. ECO sólo manda LA si el papel operó en la
+    # rueda de hoy: un ilíquido sin operaciones llega sin LA, y su precio en la
+    # base sigue siendo el de días atrás. Con esto se sabe cuál es cuál.
+    last_ms = (md.get("LA") or {}).get("date")
     bid  = md.get("BI")[0].get("price") if isinstance(md.get("BI"), list) and md["BI"] else None
     ask  = md.get("OF")[0].get("price") if isinstance(md.get("OF"), list) and md["OF"] else None
     cl   = md.get("CL")
@@ -149,6 +154,7 @@ def market_data_handler(msg: dict):
         prev = _latest.get(tk, {})
         _latest[tk] = {
             "last": float(last) if last is not None else prev.get("last"),
+            "last_ms": last_ms if last is not None and last_ms else prev.get("last_ms"),
             "bid":  float(bid)  if bid  is not None else None,
             "ask":  float(ask)  if ask  is not None else None,
             "closing": float(closing) if closing is not None else prev.get("closing"),
@@ -208,9 +214,14 @@ def pusher_loop():
                 try: chg = (price_ars / closing) - 1.0
                 except: pass
             price_ars_usd = (price_ars / mep) if (price_ars is not None and mep) else None
+            # Operó si operó cualquiera de las dos especies, la de pesos o la D.
+            ms = max([m for m in (d_pesos.get("last_ms"), d_usd.get("last_ms") if d_usd else None) if m],
+                     default=None)
+            last_trade_at = datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat() if ms else None
 
             try:
-                upsert_price(sym_pesos, last, bid, ask, price_ars, mep, closing, chg, price_ars_usd)
+                upsert_price(sym_pesos, last, bid, ask, price_ars, mep, closing, chg, price_ars_usd,
+                             last_trade_at)
                 _pushed[sym_pesos] = now
                 pu = f"{price_ars_usd:,.2f}" if price_ars_usd is not None else "N/A"
                 print(f"[PUSH] {sym_pesos:8s} ARS={price_ars}  USD_last={last}  ARSusd={pu}  MEP={mep}")
