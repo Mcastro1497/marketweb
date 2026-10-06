@@ -110,10 +110,14 @@ def macaulay(cfs_pos, r):
 # ── IO Supabase ───────────────────────────────────────────
 def load_instruments_and_prices():
     rows = sb.table("instruments") \
-             .select("symbol, instrument_type") \
+             .select("symbol, instrument_type, referencias") \
              .eq("is_active", True) \
              .in_("instrument_type", ["ON","HD"]) \
              .execute().data or []
+    # Una ON dólar linked paga al A3500, no al MEP: dolarizarla con el MEP como
+    # a un hard dollar le inflaba la TIR (TLCKO daba 13% con la paridad sobre
+    # 100). Esas las valúa dlk.py.
+    rows = [r for r in rows if r.get("referencias") != "A3500"]
     symbols = [r["symbol"] for r in rows]
     prices  = sb.table("prices").select("symbol, last, price_ars_usd").execute().data or []
 
