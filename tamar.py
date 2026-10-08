@@ -276,10 +276,11 @@ def valuar_bono(inst: dict, tamar_obs: dict, feriados: set, hoy: date):
     # una TEM efectiva durante los días que faltan. Lo que exceda a la TAMAR
     # esperada para ese tramo (tem_proy, porque de hoy al vto es todo futuro)
     # es el margen, y se pasa a TNA con la inversa.
-    dias_rest = dias360(fecha_liq, vto)
+    # La TEM sale de la TIR en base real/365 (meses de 365/12 días), como 1816;
+    # con 30/360 el margen quedaba ~9 bps abajo de la pantalla (TML27: 2,90 vs 3,00).
     margen_mkt = None
-    if dias_rest > 0 and precio > 0:
-        tem_ef = (vpv / precio) ** (30 / dias_rest) - 1
+    if precio > 0:
+        tem_ef = (1 + tea) ** (1 / 12) - 1
         # Se resta TNA contra TNA, no TEM contra TEM: es el criterio del
         # terminal, y el margen de emisión también está expresado en TNA.
         # La diferencia entre los dos caminos es chica (~0,01 pp) pero así

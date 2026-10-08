@@ -1479,11 +1479,12 @@ def valuar_simbolo(ctx: Ctx, inst: dict, patas: list, esc: dict, prow: Optional[
         # para un bono con cupones capitaliza la vida entera y da disparates: a
         # RVS1O le ponía TAMAR +620 pp.
         #
-        # Se replica la convención de tamar.py al pie de la letra —TEM sobre
-        # períodos de 30 días con días 30/360, y la resta en TNA contra TNA— para
-        # que el número de los bullet no se mueva ni un bp: es el que se validó
-        # contra el terminal. Lo único nuevo es de dónde sale la TEM cuando el
-        # bono paga cupones: ahí no hay un vpv/precio único y se deriva de la TIR.
+        # La TEM sale de la TIR efectiva en base real/365, en meses de 365/12
+        # días: TEM = (1+TIR)^(1/12) - 1. Es la convención de 1816: en TML27 a
+        # 110,25 da TEM 2,27% -> TNA [32/365] 27,21% -> margen 3,00% sobre la
+        # TAMAR proyectada. Antes se usaban días 30/360 y meses de 30 días, que
+        # en ese mismo bono daban 2,90%: ~9 bps por debajo de la pantalla. La
+        # resta sigue siendo TNA contra TNA, como el margen de emisión.
         #
         # No se calcula para BADLAR: su cupón devenga TNA·días/365 simple, así que
         # pasar por tamar_tna() —que capitaliza en períodos de 32 días— mezclaría
@@ -1491,13 +1492,12 @@ def valuar_simbolo(ctx: Ctx, inst: dict, patas: list, esc: dict, prow: Optional[
         margen_mkt = None
         if leg == "TAMAR" and pata.driver is not None and precio and precio > 0:
             tem_ef = None
-            if pata.flujos:
-                if ytm_nat is not None:
-                    tem_ef = (1 + ytm_nat) ** (30 / 360) - 1
-            else:
-                d360 = dias360(fecha_liq, inst["_vencimiento"])
-                if d360 > 0:
-                    tem_ef = (pata.vpv / precio) ** (30 / d360) - 1
+            if ytm_nat is not None:
+                tem_ef = (1 + ytm_nat) ** (1 / 12) - 1
+            elif not pata.flujos:
+                dias = (inst["_vencimiento"] - fecha_liq).days
+                if dias > 0:
+                    tem_ef = (pata.vpv / precio) ** ((365 / 12) / dias) - 1
             if tem_ef is not None and tem_ef > -1:
                 margen_mkt = tamar_tna(tem_ef) - pata.driver
 
